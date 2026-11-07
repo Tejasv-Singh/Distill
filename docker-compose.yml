@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: distill
+      POSTGRES_PASSWORD: distill
+      POSTGRES_DB: distill
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U distill"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build: .
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+psycopg://distill:distill@db:5432/distill
+      STORAGE_DIR: /app/data/files
+    ports: ["8000:8000"]
+    volumes: [files:/app/data]
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  files:
