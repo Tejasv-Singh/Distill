@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://localhost:8765/index.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/page-1.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/page-2.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/page-3.html</loc></url>
+  <url><loc>http://localhost:8765/blog/how-we-pick-books.html</loc></url>
+  <url><loc>http://localhost:8765/docs/api.html</loc></url>
+  <url><loc>http://localhost:8765/reports/sales-2026.html</loc></url>
+  <url><loc>http://localhost:8765/staff-picks.html</loc></url>
+  <url><loc>http://localhost:8765/about.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-1.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-2.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-3.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-4.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-5.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-6.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-7.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-8.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-9.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-10.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-11.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-12.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-13.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-14.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-15.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-16.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-17.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-18.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-19.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-20.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-21.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-22.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-23.html</loc></url>
+  <url><loc>http://localhost:8765/catalogue/book-24.html</loc></url>
+</urlset>

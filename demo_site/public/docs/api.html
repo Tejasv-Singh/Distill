@@ -1,0 +1,23 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Catalogue API reference | Northwind Books</title>
+<meta name="description" content="Developer documentation for the Northwind Catalogue API."><meta property="og:site_name" content="Northwind Books">
+<link rel="stylesheet" href="../style.css"></head><body>
+<header class="site"><strong>Northwind Books</strong> <nav class="main"><a href="../index.html">Home</a><a href="../catalogue/page-1.html">Catalogue</a>
+<a href="../blog/how-we-pick-books.html">Blog</a><a href="../docs/api.html">API docs</a><a href="../reports/sales-2026.html">Reports</a></nav></header>
+<div class="cookie-banner" id="cookie-consent">We use cookies to improve your experience. <button>Accept all cookies</button></div>
+<div class="wrap"><main><h1>Catalogue API reference</h1><p>The Northwind Catalogue API returns book data as JSON. All requests use HTTPS and require an API key sent in the <code>X-Api-Key</code> header.</p>
+<h2>Authentication</h2><p>Create a key in your account settings. Keys are 32 characters long and can be revoked at any time.</p>
+<pre><code>curl -H "X-Api-Key: YOUR_KEY" https://api.northwind.example/v1/books</code></pre>
+<h2>List books</h2><p><code>GET /v1/books</code> returns a paginated list.</p>
+<table><thead><tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td>page</td><td>integer</td><td>1</td><td>Page number</td></tr><tr><td>per_page</td><td>integer</td><td>20</td><td>Results per page (max 100)</td></tr>
+<tr><td>genre</td><td>string</td><td>—</td><td>Filter by genre</td></tr><tr><td>in_stock</td><td>boolean</td><td>false</td><td>Only books currently in stock</td></tr></tbody></table>
+<pre><code>import requests
+
+resp = requests.get("https://api.northwind.example/v1/books",
+                    headers={"X-Api-Key": KEY}, params={"genre": "Poetry"})
+for book in resp.json()["data"]:
+    print(book["title"], book["price"])</code></pre>
+<h2>Rate limits</h2><p>Each key may make 600 requests per minute. Exceeding the limit returns HTTP 429 with a <code>Retry-After</code> header.</p>
+<h2>Errors</h2><ol><li><strong>401</strong>: missing or invalid key.</li><li><strong>404</strong>: the book doesn't exist.</li><li><strong>429</strong>: rate limit exceeded.</li></ol></main></div>
+<footer class="site">© 2026 Northwind Books (a demo site for testing Distill). <a href="../about.html">About</a> · <a href="../privacy.html">Privacy</a></footer>
+</body></html>

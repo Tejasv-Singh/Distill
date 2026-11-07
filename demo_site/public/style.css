@@ -1,0 +1,7 @@
+body{font-family:Georgia,serif;margin:0;color:#222}header.site{background:#283044;color:#fff;padding:14px 24px}
+header.site a{color:#cde;margin-right:14px}nav.main a{margin-right:12px}.wrap{max-width:960px;margin:0 auto;padding:20px}
+.cookie-banner{position:fixed;bottom:0;left:0;right:0;background:#ffd;padding:10px;border-top:1px solid #cc9}
+.ad-slot{background:#eee;padding:20px;text-align:center;margin:10px 0}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.product_pod{border:1px solid #ddd;padding:10px}.price_color{color:#2a7a2a;font-weight:bold}footer.site{background:#eee;padding:20px;margin-top:30px}
+aside.sidebar{float:right;width:220px;background:#f6f6f6;padding:10px;margin-left:20px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}
+pre{background:#f4f4f4;padding:10px}
