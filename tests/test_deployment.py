@@ -7,6 +7,7 @@ fail with the same error Vercel raises: OSError [Errno 30] Read-only file system
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -76,6 +77,10 @@ def run_app(script: str, env: dict, demo: bool = False, timeout: int = 240) -> d
     """Run `script` in a fresh interpreter with a read-only application directory.
     The script must print one JSON line prefixed with RESULT=."""
     full_env = {k: v for k, v in os.environ.items() if k not in _SCRUB}
+    # Blank rather than drop: the app fills *missing* variables from the repo's .env/.env.local,
+    # so a developer's JS_RENDERING=true or Neon DATABASE_URL would otherwise leak into the test.
+    # The app treats an empty value as unset.
+    full_env.update({k: "" for k in _SCRUB})
     full_env.update({"PYTHONDONTWRITEBYTECODE": "1", "RATE_LIMIT_PER_MINUTE": "0", "MIN_CRAWL_DELAY": "0"})
     full_env.update(env)
     code = READONLY_PRELUDE + (DEMO_SERVER if demo else "") + textwrap.dedent(script)
@@ -101,8 +106,18 @@ def postgres_url():
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
+    class _Manager(PGliteManager):
+        def _install_dependencies(self, work_dir):
+            # py-pglite runs a bare ["npm", "install"]; on Windows npm is npm.cmd, which
+            # CreateProcess can't find (WinError 2). Install via the resolved path first.
+            npm = shutil.which("npm")
+            if os.name == "nt" and npm and not (Path(work_dir) / "node_modules").exists():
+                subprocess.run([npm, "install"], cwd=work_dir, capture_output=True,
+                               text=True, check=True, timeout=300)
+            super()._install_dependencies(work_dir)
+
     try:
-        mgr = PGliteManager(PGliteConfig(use_tcp=True, tcp_port=port, timeout=120))
+        mgr = _Manager(PGliteConfig(use_tcp=True, tcp_port=port, timeout=120))
         mgr.start()
     except Exception as e:  # noqa: BLE001  (needs Node.js)
         pytest.skip(f"could not start PGlite: {e}")
@@ -120,7 +135,8 @@ def test_regression_vercel_import_crash_is_fixed():
         from app.config import settings
         print("RESULT=" + json.dumps({"runtime_dir": str(settings.runtime_dir), "serverless": settings.serverless}))
     ''', {"VERCEL": "1"})
-    assert out == {"runtime_dir": "/tmp/distill", "serverless": True}
+    # Vercel is Linux; on a Windows test host str(Path) uses backslashes for the same path
+    assert Path(out["runtime_dir"]).as_posix() == "/tmp/distill" and out["serverless"] is True
 
 
 def test_import_never_writes_locally_either():
@@ -324,7 +340,9 @@ def test_direct_url_used_only_for_schema(tmp_path):
         from app.db import ensure_db, engine, local_user_id
         ensure_db()
         local_user_id()
-        print("RESULT=" + json.dumps({"app": str(engine.url), "direct": settings.database_url_direct,
+        from sqlalchemy.engine import make_url
+        # str(URL) percent-encodes Windows paths (C:\\ -> C%3A%5C), so compare URLs in that same form
+        print("RESULT=" + json.dumps({"app": str(engine.url), "direct": str(make_url(settings.database_url_direct)),
                                       "ddl": sorted(ddl_urls), "writes": sorted(write_urls)}))
     """, {"DATABASE_URL": f"sqlite:///{tmp_path}/neon.db",
           "DATABASE_URL_UNPOOLED": f"sqlite:///{tmp_path}/neon.db?timeout=30"})
