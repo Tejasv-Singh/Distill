@@ -217,7 +217,7 @@ pip install -r requirements-dev.txt   # adds PGlite (needs Node.js) for the Post
 python -m pytest -q
 ```
 
-There are 76 tests covering URL validation and SSRF (private ranges, metadata IP, redirects to internal
+There are 77 tests covering URL validation and SSRF (private ranges, metadata IP, redirects to internal
 hosts), bot-wall detection, extraction on every demo page type, table captions and headers,
 inline code, JavaScript rendering, the AI pipeline (with a fake LLM: citation cleanup,
 invented-number detection, injection flagging, map-reduce chunking, section rewrites), the chat
@@ -264,6 +264,21 @@ If `DATABASE_URL` is missing, the app still starts and serves the UI, but every 
 **503** with an explanation, and a banner tells you what to set. It never silently writes your
 data to a disk that disappears. For a throwaway demo you can opt into temporary storage with
 `ALLOW_EPHEMERAL_STORAGE=1`.
+
+### Neon
+
+The repo is linked to Neon (`neon.ts`, created by `neon init`). `neon deploy` provisions the
+services declared there and writes `DATABASE_URL` (pooled, used by the app) and
+`DATABASE_URL_UNPOOLED` (direct, used only to create tables) into `.env`, or `.env.local` if
+there is no `.env`. Distill reads both files. Then verify everything end to end:
+
+```bash
+python scripts/check_neon.py
+```
+
+It checks the configuration, connects over both URLs, creates the tables, round-trips a file
+through database storage, and runs scrape → CSV/PDF → download → delete through the app.
+For Vercel, copy the same two variables into the project's environment variables.
 
 ### Limits on Vercel
 
