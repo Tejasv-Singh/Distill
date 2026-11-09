@@ -1,0 +1,13 @@
+# Not needed in the production function bundle
+tests/
+demo_site/
+demo_outputs/
+scripts/
+data/
+.venv/
+venv/
+*.zip
+start.bat
+run.py
+docker-compose.yml
+Dockerfile

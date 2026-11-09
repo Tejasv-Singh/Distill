@@ -213,16 +213,70 @@ in `app/ai/providers.py`.
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt   # adds PGlite (needs Node.js) for the PostgreSQL tests
 python -m pytest -q
 ```
 
-There are 65 tests covering URL validation and SSRF (private ranges, metadata IP, redirects to internal
+There are 76 tests covering URL validation and SSRF (private ranges, metadata IP, redirects to internal
 hosts), bot-wall detection, extraction on every demo page type, table captions and headers,
 inline code, JavaScript rendering, the AI pipeline (with a fake LLM: citation cleanup,
 invented-number detection, injection flagging, map-reduce chunking, section rewrites), the chat
-assistant (scripted LLM: scrape → extract → refine → export, the host restriction, provider message formats), every
+assistant (scripted LLM: scrape → extract → refine → export, the host restriction, provider message formats),
+**deployment** (a read-only app directory reproducing Vercel's `Errno 30`, Vercel env on real PostgreSQL via
+PGlite, the missing-database guard, stale-job cleanup, storage backends), every
 exporter (files are re-opened with their libraries), and full API workflows (crawl, pagination,
 records, multi-output generation, edit, re-render, history, delete, error states).
+
+## Deploying to Vercel
+
+Distill detects Vercel automatically (`VERCEL=1`) and adapts:
+
+| Concern | Local / Docker | On Vercel |
+|---|---|---|
+| App directory | writable | **never written to** (it is read-only) |
+| Scratch files | `data/` | `/tmp/distill` (ephemeral, per instance) |
+| Database | SQLite `data/app.db` | **PostgreSQL from `DATABASE_URL`**, required |
+| Generated files & screenshots | disk (`STORAGE_BACKEND=local`) | stored in the database (`STORAGE_BACKEND=database`) so any instance can serve them |
+| Jobs (scrape, generate, chat) | background tasks + live progress | run **inside the request** (`JOB_MODE=inline`): a frozen instance can't strand them |
+| Interrupted jobs | marked failed on restart | marked failed once older than `STALE_JOB_MINUTES` (6) |
+| Headless Chromium | used for JS pages, screenshots, PDF | not available: static fetching, no screenshots, PDF via ReportLab |
+| Crawl caps | 100 pages / depth 5 | 20 pages / depth 3 (must finish within the function time limit) |
+
+### Steps
+
+1. **Create a PostgreSQL database**: Neon, Supabase or a Postgres integration from the Vercel
+   Marketplace. Copy its **pooled** connection string (Neon: the `-pooler` host; Supabase:
+   the transaction pooler). `postgres://…` and `postgresql://…` both work as-is.
+2. In **Vercel → Project → Settings → Environment Variables**, add:
+
+   | Variable | Required | Value |
+   |---|---|---|
+   | `DATABASE_URL` | **yes** | the pooled Postgres URL (`POSTGRES_URL` from a Vercel integration is also picked up) |
+   | `AI_PROVIDER` + `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | for AI features | your provider and key |
+   | `MAX_PAGES_CAP`, `STALE_JOB_MINUTES`, `MAX_STORED_FILE_BYTES` | no | tuning (see `.env.example`) |
+
+   Don't set `PRIVATE_HOST_ALLOWLIST` in production. Never commit keys: `.env` is git-ignored.
+3. **Redeploy**, then open `https://<your-app>.vercel.app/api/health`. It returns `"ok": true`,
+   `"database": "postgresql"` and `"persistent": true` when the deployment is configured correctly.
+   Tables are created automatically on first start.
+
+If `DATABASE_URL` is missing, the app still starts and serves the UI, but every API call returns
+**503** with an explanation, and a banner tells you what to set. It never silently writes your
+data to a disk that disappears. For a throwaway demo you can opt into temporary storage with
+`ALLOW_EPHEMERAL_STORAGE=1`.
+
+### Limits on Vercel
+
+* **Time:** each scrape, generation or chat turn must finish within the function's max duration
+  (300 s by default with Fluid compute; Pro plans can raise it). Big crawls belong on a server.
+* **Response size:** Vercel caps function responses at 4.5 MB, so larger downloads (image-heavy
+  PDFs or decks) fail there. Move file storage to an object store (S3, R2, Vercel Blob) by adding
+  a backend in `app/storage.py` and redirecting downloads to it.
+* **No browser:** JavaScript-only sites come back mostly empty, and screenshots are off.
+* **Per-instance state:** rate limiting and "Cancel" apply within one instance.
+
+For the full feature set (browser rendering, long crawls, live progress), deploy the Docker image
+on a long-running host such as Render, Railway, Fly.io or a VM.
 
 ## Deployment
 
@@ -244,6 +298,7 @@ app/
   schemas.py           request validation
   security.py          URL normalisation, SSRF checks, rate limiting
   generation.py        documents → outputs → files
+  storage.py           file storage: local disk or database (serverless)
   scraping/            fetcher (static + guarded browser), extractor, classifier, discovery (robots,
                        sitemaps, patterns), selectors (precise mode), pipeline (the job)
   ai/                  providers (Anthropic, OpenAI), prompts, engine (chunking, validation)
