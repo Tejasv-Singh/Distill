@@ -183,3 +183,41 @@ def test_provider_message_formats():
 def test_chat_requires_ai(client):
     r = client.post("/api/chats", json={"message": "https://example.com titles"})
     assert r.status_code == 503
+
+
+def test_gemini_replays_thought_signatures(monkeypatch):
+    """Gemini 3 rejects a follow-up request unless each tool call's thought signature is sent back."""
+    from app.ai.providers import GeminiProvider
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    sent = []
+    replies = [
+        {"choices": [{"message": {"content": None, "tool_calls": [{
+            "id": "call_1", "type": "function",
+            "function": {"name": "scrape_website", "arguments": '{"urls": ["https://example.com"]}'},
+            "extra_content": {"google": {"thought_signature": "SIG123"}}}]}}]},
+        {"choices": [{"message": {"content": "Done."}}]},
+    ]
+
+    async def fake_post(self, url, headers, payload):
+        sent.append((url, headers, payload))
+        return replies[len(sent) - 1]
+    monkeypatch.setattr(GeminiProvider, "_post", fake_post)
+
+    p = GeminiProvider("gemini-test", "gemini-test-lite")
+    tools = [{"name": "scrape_website", "description": "d", "parameters": {"type": "object", "properties": {}}}]
+    turn = asyncio.run(p.chat("sys", [{"role": "user", "content": "https://example.com titles"}], tools))
+    assert turn.tool_calls[0].extra == {"extra_content": {"google": {"thought_signature": "SIG123"}}}
+
+    history = [{"role": "user", "content": "https://example.com titles"},
+               {"role": "assistant", "content": "", "tool_calls": [{"id": c.id, "name": c.name, "input": c.input,
+                                                                     "extra": c.extra} for c in turn.tool_calls]},
+               {"role": "tool", "tool_call_id": "call_1", "name": "scrape_website", "content": "{}"}]
+    turn2 = asyncio.run(p.chat("sys", history, tools))
+    assert turn2.text == "Done."
+    url, headers, payload = sent[1]
+    assert url == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    assert headers["Authorization"] == "Bearer test-key"
+    assert payload["max_tokens"] and "max_completion_tokens" not in payload
+    replayed = payload["messages"][2]["tool_calls"][0]
+    assert replayed["extra_content"]["google"]["thought_signature"] == "SIG123"

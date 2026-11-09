@@ -304,7 +304,9 @@ class Agent:
                 history = _trim(messages)
                 turn = await provider.chat(SYSTEM, [_strip_display(m) for m in history], TOOLS, max_tokens=3000)
                 messages.append({"role": "assistant", "content": turn.text,
-                                 "tool_calls": [{"id": c.id, "name": c.name, "input": c.input} for c in turn.tool_calls]})
+                                 "tool_calls": [{"id": c.id, "name": c.name, "input": c.input,
+                                                **({"extra": c.extra} if c.extra else {})}
+                                               for c in turn.tool_calls]})
                 self._save(messages)
                 if not turn.tool_calls:
                     break

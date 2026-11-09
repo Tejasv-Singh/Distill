@@ -78,7 +78,7 @@ class Settings:
     max_concurrent_jobs: int = _int("MAX_CONCURRENT_JOBS", 3)
 
     # AI
-    ai_provider: str = os.getenv("AI_PROVIDER", "anthropic").lower()   # anthropic | openai
+    ai_provider: str = os.getenv("AI_PROVIDER", "anthropic").lower()   # anthropic | openai | gemini
     anthropic_api_key: str | None = os.getenv("ANTHROPIC_API_KEY") or None
     anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
     anthropic_fast_model: str = os.getenv("ANTHROPIC_FAST_MODEL", "claude-haiku-5-5")
@@ -86,6 +86,10 @@ class Settings:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5")
     openai_fast_model: str = os.getenv("OPENAI_FAST_MODEL", "gpt-5-mini")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    gemini_fast_model: str = os.getenv("GEMINI_FAST_MODEL", "gemini-3.5-flash-lite")
+    gemini_base_url: str = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
     ai_timeout: float = _float("AI_TIMEOUT", 120)
     # characters of page text per chunk (~4 chars per token)
     ai_chunk_chars: int = _int("AI_CHUNK_CHARS", 24000)
@@ -94,6 +98,8 @@ class Settings:
     def ai_configured(self) -> bool:
         if self.ai_provider == "openai":
             return bool(self.openai_api_key)
+        if self.ai_provider == "gemini":
+            return bool(self.gemini_api_key)
         return bool(self.anthropic_api_key)
 
 

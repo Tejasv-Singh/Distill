@@ -481,7 +481,7 @@ async function viewConfigure(pid) {
     const el = h("button", { type: "button", class: "choice" + (disabled ? " disabled" : ""), "aria-pressed": "false", title: disabled ? "Add an AI API key in .env to enable AI outputs" : "" },
       h("b", { text: label }), h("span", { text: desc }));
     el.onclick = () => {
-      if (disabled) return toast("AI outputs need an API key: set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env and restart.", true);
+      if (disabled) return toast("AI outputs need an API key: set ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY in .env and restart.", true);
       sel.has(id) ? sel.delete(id) : sel.set(id, { kind, format: key });
       el.classList.toggle("on", sel.has(id)); el.setAttribute("aria-pressed", String(sel.has(id)));
       update();
@@ -569,7 +569,7 @@ async function viewConfigure(pid) {
     h("div", { class: "row small muted", style: "margin-bottom:8px" }, h("a", { href: `#/p/${pid}`, text: "← " + p.name })),
     h("h1", { style: "font-size:28px", text: "What would you like to turn this content into?" }),
     h("p", { class: "muted", style: "margin:8px 0 24px", text: `${p.pages.length} page(s) · ${fmtNum(p.totals.word_count)} words · ${p.totals.tables} tables. Select as many outputs as you like.` }),
-    !aiOK ? h("div", { class: "alert info small", style: "margin-bottom:16px", text: "AI outputs are turned off because no AI API key is set. Add ANTHROPIC_API_KEY or OPENAI_API_KEY to .env and restart to enable them. All file conversions work without one." }) : null,
+    !aiOK ? h("div", { class: "alert info small", style: "margin-bottom:16px", text: "AI outputs are turned off because no AI API key is set. Add ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY to .env and restart to enable them. All file conversions work without one." }) : null,
     group("Documents", "convert", FORMATS.documents), group("Spreadsheets", "convert", FORMATS.spreadsheets),
     group("Structured data", "convert", FORMATS.structured), group("Presentations", "convert", FORMATS.presentations),
     group("AI-generated", "ai", AI_OUT),
@@ -804,7 +804,7 @@ async function viewChat(cid) {
       thread.append(h("div", { class: "chat-empty" },
         h("h1", { text: "What do you want to extract?" }),
         h("p", { class: "muted", text: "Give me a website and describe the data you want in plain English. I'll scrape it, pull out exactly that, and hand you a table you can refine and download." }),
-        !aiOK ? h("div", { class: "alert info small", style: "margin:16px auto;max-width:560px;text-align:left", text: "The assistant needs an AI key. Add ANTHROPIC_API_KEY (or OPENAI_API_KEY with AI_PROVIDER=openai) to the .env file in your project folder, then restart Distill." }) : null,
+        !aiOK ? h("div", { class: "alert info small", style: "margin:16px auto;max-width:560px;text-align:left", text: "The assistant needs an AI key. Add ANTHROPIC_API_KEY (or GEMINI_API_KEY with AI_PROVIDER=gemini, or OPENAI_API_KEY with AI_PROVIDER=openai) to the .env file in your project folder, then restart Distill." }) : null,
         h("div", { class: "examples" }, ...examples.map(([t, q]) => h("button", { class: "example", disabled: !aiOK, onclick: () => { input.value = q; input.focus(); } },
           h("b", { text: t }), h("span", { text: q }))))));
     } else {

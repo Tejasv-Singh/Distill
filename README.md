@@ -100,7 +100,8 @@ Everything comes from environment variables or `.env`. See [`.env.example`](.env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AI_PROVIDER` | `anthropic` | `anthropic` or `openai` (any OpenAI-compatible endpoint via `OPENAI_BASE_URL`) |
+| `AI_PROVIDER` | `anthropic` | `anthropic`, `gemini` or `openai` (any OpenAI-compatible endpoint via `OPENAI_BASE_URL`) |
+| `GEMINI_API_KEY` | — | Google AI Studio key, used with `AI_PROVIDER=gemini` (models: `GEMINI_MODEL`, `GEMINI_FAST_MODEL`) |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | — | Enables AI outputs. File conversions don't need it. |
 | `ANTHROPIC_MODEL`, `ANTHROPIC_FAST_MODEL` | `claude-sonnet-5-5`, `claude-haiku-5-5` | Main model writes the output; fast model reads long pages in chunks |
 | `OPENAI_MODEL`, `OPENAI_FAST_MODEL` | `gpt-5`, `gpt-5-mini` | Same, for OpenAI |
