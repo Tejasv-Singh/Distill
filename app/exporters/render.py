@@ -105,6 +105,11 @@ def image_srcs(md: str) -> list[str]:
 
 # ------------------------------------------------------------------------ PDF
 async def render_pdf(md: str, opts: dict) -> tuple[bytes, list[str]]:
+    from ..config import settings
+    if not settings.js_rendering:
+        # no browser on this deployment (e.g. Vercel): go straight to the ReportLab renderer
+        imgs = await fetch_images(image_srcs(md)) if opts.get("include_images", True) else {}
+        return await asyncio.to_thread(render_pdf_reportlab, md, opts, imgs), []
     html = render_html(md, opts)
     fetcher = Fetcher()
     try:

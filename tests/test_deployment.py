@@ -221,7 +221,7 @@ def test_vercel_ephemeral_demo_mode_is_explicit(tmp_path):
                                       "pdf_size": len(pdf), "backend": get_storage().name}))
     ''', {"VERCEL": "1", "ALLOW_EPHEMERAL_STORAGE": "1", "RUNTIME_DIR": str(tmp_path)}, demo=True)
     assert out["ok"] and out["status"] == "done" and "temporary storage" in out["warnings"][0]
-    assert out["pdf"] == "25504446" and out["pdf_size"] > 64_000 and out["backend"] == "database"  # %PDF via DB storage
+    assert out["pdf"] == "25504446" and out["backend"] == "database"   # %PDF (ReportLab, no browser) via DB storage
     assert (tmp_path / "app.db").exists()        # the scratch DB lives in the runtime dir, not the app dir
 
 
@@ -274,6 +274,9 @@ def test_database_storage_roundtrip():
     assert st.get("proj_x/outputs/a.csv") == b"a,b\n1,2\n"
     st.put("proj_x/outputs/a.csv", b"v2")               # overwrite
     assert st.get("proj_x/outputs/a.csv") == b"v2"
+    big = os.urandom(3 * 1024 * 1024)                    # multi-MB binary survives the round trip
+    st.put("proj_x/outputs/big.pdf", big, "application/pdf")
+    assert st.get("proj_x/outputs/big.pdf") == big
     st.delete_prefix("proj_x")
     assert st.get("proj_x/preview.png") is None and st.get("proj_xy/outputs/b.csv") == b"keep"
 
