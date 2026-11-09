@@ -247,3 +247,5 @@ pre.code-view{white-space:pre;overflow:auto;max-height:72vh;font:12.5px/1.5 var(
 .example:hover{border-color:var(--accent)} .example b{display:block;font-size:13.5px} .example span{font-size:12.5px;color:var(--muted)}
 .example:disabled{opacity:.5;cursor:not-allowed}
 @media (max-width:900px){.chat-layout{grid-template-columns:1fr;height:auto}.chat-side{display:none}.examples{grid-template-columns:1fr}.thread{min-height:50vh}}
+
+.deploy-banner{max-width:1120px;margin:12px auto 0;padding:0 24px;display:flex;flex-direction:column;gap:8px}

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from . import generation
 from .ai.providers import AIError, ai_status
 from .config import BASE_DIR, settings
-from .db import ChatSession, GeneratedOutput, Project, ScrapedPage, ScrapingJob, init_db, local_user_id, session
+from .db import ChatSession, GeneratedOutput, Project, ScrapedPage, ScrapingJob, ensure_db, local_user_id, session
 from .exporters.render import render_html
 from .schemas import (AI_TYPES, CONVERT_FORMATS, ChatMessageIn, DiscoverRequest, GenerateRequest, OutputEdit, ProjectPatch,
                       RegenerateRequest, RenderRequest, ScrapeRequest)
@@ -23,36 +25,95 @@ from .scraping.extractor import document_text
 from .scraping.fetcher import FetchError
 from .scraping.pipeline import STAGE_LABEL, JobControl, discover_pages, run_scrape_job
 from .security import rate_limiter, safe_filename
+from .storage import get_storage
+
+log = logging.getLogger("distill")
 
 STATIC = Path(__file__).parent / "static"
 _tasks: set[asyncio.Task] = set()
 _scrape_sem: asyncio.Semaphore | None = None
 
 
-def _spawn(coro) -> None:  # noqa: ANN001
+def _get_scrape_sem() -> asyncio.Semaphore:
+    global _scrape_sem
+    if _scrape_sem is None:
+        _scrape_sem = asyncio.Semaphore(max(1, settings.max_concurrent_jobs))
+    return _scrape_sem
+
+
+async def _dispatch(coro) -> None:  # noqa: ANN001
+    """Run a job. JOB_MODE=background: after the response (long-lived servers).
+    JOB_MODE=inline: before the response, because a serverless instance can be frozen as soon
+    as the response is sent and an orphaned task would never finish."""
+    if settings.job_mode == "inline":
+        await coro
+        return
     t = asyncio.create_task(coro)
     _tasks.add(t)
     t.add_done_callback(_tasks.discard)
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    global _scrape_sem
-    init_db()
-    _scrape_sem = asyncio.Semaphore(max(1, settings.max_concurrent_jobs))
-    # never leave anything "running" forever after a restart
+def reap_interrupted(only_stale: bool) -> int:
+    """Mark jobs that can no longer finish as failed so the UI never spins forever.
+    only_stale=False (process start on a long-lived server): everything still "running" died with
+    the old process. only_stale=True (serverless, any instance): only work older than
+    STALE_JOB_MINUTES, because other instances may be running the rest right now."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=settings.stale_job_minutes)
+    msg = ("Interrupted by a server restart." if not only_stale else
+           "Interrupted: it ran longer than the time limit or the server stopped.")
+    n = 0
     with session() as s:
-        now = datetime.now(timezone.utc)
-        for j in s.query(ScrapingJob).filter(ScrapingJob.status.in_(["queued", "running"])):
-            j.status, j.stage, j.error_message, j.completed_at = "failed", "failed", "Interrupted by a server restart. Retry the scrape.", now
-        for p in s.query(Project).filter(Project.scraping_status.in_(["queued", "running"])):
-            p.scraping_status = "failed"
-        for o in s.query(GeneratedOutput).filter(GeneratedOutput.status.in_(["queued", "running"])):
-            o.status, o.error_message = "failed", "Interrupted by a server restart. Regenerate it."
-        for c in s.query(ChatSession).filter(ChatSession.status == "running"):
+        q = s.query(ScrapingJob).filter(ScrapingJob.status.in_(["queued", "running"]))
+        if only_stale:
+            q = q.filter(ScrapingJob.started_at < cutoff)
+        for j in q:
+            j.status, j.stage, j.error_message, j.completed_at = "failed", "failed", msg + " Retry the scrape.", now
+            p = s.get(Project, j.project_id)
+            if p and p.scraping_status in ("queued", "running"):
+                p.scraping_status = "done" if p.pages else "failed"
+            n += 1
+        q = s.query(GeneratedOutput).filter(GeneratedOutput.status.in_(["queued", "running"]))
+        if only_stale:
+            q = q.filter(GeneratedOutput.updated_at < cutoff)
+        for o in q:
+            o.status, o.stage, o.error_message = "failed", "Failed", msg + " Regenerate it."
+            n += 1
+        q = s.query(ChatSession).filter(ChatSession.status == "running")
+        if only_stale:
+            q = q.filter(ChatSession.updated_at < cutoff)
+        for c in q:
             c.status, c.status_detail = "idle", ""
             c.messages = list(c.messages or []) + [{"role": "assistant", "content": "", "tool_calls": [],
-                                                    "error": "Interrupted by a server restart. Send your message again."}]
+                                                    "error": msg + " Send your message again."}]
+            n += 1
+    return n
+
+
+_last_reap = 0.0
+
+
+def _maybe_reap() -> None:
+    global _last_reap
+    if settings.serverless and time.monotonic() - _last_reap > 30:
+        _last_reap = time.monotonic()
+        try:
+            reap_interrupted(only_stale=True)
+        except Exception:  # noqa: BLE001  (housekeeping must never break a request)
+            log.exception("stale-job cleanup failed")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    problems = settings.deployment_problems()
+    for p in problems:
+        log.error("Deployment configuration problem: %s", p)
+    if not problems:
+        try:
+            ensure_db()
+            reap_interrupted(only_stale=settings.serverless)
+        except Exception:  # noqa: BLE001  (reported per request by the readiness guard)
+            log.exception("Database initialisation failed")
     yield
     for t in list(_tasks):
         t.cancel()
@@ -60,6 +121,29 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Distill API", version="2.0.0", lifespan=lifespan,
               description="Scrape websites into a structured document, then turn it into any format.")
+
+
+_OPEN_PATHS = {"/api/health", "/api/config"}
+
+
+@app.middleware("http")
+async def readiness(request: Request, call_next):  # noqa: ANN001, ANN201
+    """Refuse API work with a clear message when the deployment can't store data, and make
+    sure the database is initialised even if the platform skipped the lifespan hook."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in _OPEN_PATHS:
+        problems = settings.deployment_problems()
+        if problems:
+            return JSONResponse({"detail": " ".join(problems), "kind": "deployment"}, status_code=503)
+        try:
+            await asyncio.to_thread(ensure_db)
+        except Exception as e:  # noqa: BLE001
+            log.exception("database unavailable")
+            return JSONResponse({"detail": f"The database is unavailable: {type(e).__name__}. Check DATABASE_URL.",
+                                 "kind": "database"}, status_code=503)
+        if request.method == "GET":
+            await asyncio.to_thread(_maybe_reap)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -113,7 +197,7 @@ def _output_json(o: GeneratedOutput, content: bool = False) -> dict:
          "file_format": generation.file_format(o), "title": o.title, "status": o.status, "stage": o.stage,
          "warnings": o.warnings or [], "error_message": o.error_message, "configuration": o.configuration,
          "editable": o.kind != "extract" and generation.file_format(o) in generation.DOC_FORMATS,
-         "has_file": bool(o.file_path and Path(o.file_path).exists()),
+         "has_file": bool(o.file_path) and o.status == "done",
          "created_at": _iso(o.created_at), "updated_at": _iso(o.updated_at)}
     if content:
         d["content"] = o.generated_content
@@ -133,7 +217,7 @@ def _project_json(p: Project, detail: bool = False) -> dict:
     words = sum((pg.extracted_content.get("stats") or {}).get("word_count", 0) for pg in pages)
     d = {"id": p.id, "name": p.name, "source_url": p.source_url, "status": p.scraping_status,
          "site_type": p.site_type, "page_count": len(pages), "word_count": words,
-         "output_count": len(p.outputs), "has_preview": bool(p.screenshot_path and Path(p.screenshot_path).exists()),
+         "output_count": len(p.outputs), "has_preview": bool(p.screenshot_path),
          "created_at": _iso(p.created_at), "updated_at": _iso(p.updated_at),
          "job": _job_json(p.jobs[0] if p.jobs else None)}
     if detail:
@@ -160,24 +244,42 @@ def _get_output(s, oid: str) -> GeneratedOutput:  # noqa: ANN001
 
 
 async def _run_scrape(pid: str, jid: str, req: ScrapeRequest) -> None:
-    assert _scrape_sem is not None
-    async with _scrape_sem:
+    async with _get_scrape_sem():
         await run_scrape_job(pid, jid, req)
 
 
-def _start_job(s, project: Project, req: ScrapeRequest) -> ScrapingJob:  # noqa: ANN001
+def _new_job(s, project: Project) -> ScrapingJob:  # noqa: ANN001
+    """Create the job row; the caller commits, then dispatches _run_scrape."""
     job = ScrapingJob(project_id=project.id, status="queued", stage="queued")
     s.add(job)
     project.scraping_status = "queued"
     s.flush()
-    _spawn(_run_scrape(project.id, job.id, req))
     return job
 
 
 # ---------------------------------------------------------------------- meta
+def _deployment_info() -> dict:
+    return {"platform": "vercel" if settings.on_vercel else ("serverless" if settings.serverless else "server"),
+            "job_mode": settings.job_mode, "storage_backend": settings.storage_backend,
+            "database": "sqlite" if settings.database_is_sqlite else "postgresql",
+            "persistent": settings.database_persistent,
+            "problems": settings.deployment_problems(), "warnings": settings.deployment_warnings()}
+
+
 @app.get("/api/health")
-def health() -> dict:
-    return {"ok": True, "time": _iso(datetime.now(timezone.utc))}
+def health() -> JSONResponse:
+    info = _deployment_info()
+    db_ok, db_error = True, None
+    if not info["problems"]:
+        try:
+            ensure_db()
+            with session() as s:
+                s.query(Project.id).limit(1).all()
+        except Exception as e:  # noqa: BLE001
+            db_ok, db_error = False, type(e).__name__
+    ok = db_ok and not info["problems"]
+    return JSONResponse({"ok": ok, "time": _iso(datetime.now(timezone.utc)), "database_ok": db_ok,
+                         "database_error": db_error, **info}, status_code=200 if ok else 503)
 
 
 @app.get("/api/config")
@@ -185,7 +287,7 @@ def config() -> dict:
     return {"ai": ai_status(), "convert_formats": CONVERT_FORMATS, "ai_types": AI_TYPES,
             "limits": {"max_pages": settings.max_pages_cap, "max_depth": settings.max_depth_cap,
                        "rate_limit_per_minute": settings.rate_limit_per_minute},
-            "js_rendering": settings.js_rendering}
+            "js_rendering": settings.js_rendering, "deployment": _deployment_info()}
 
 
 # ------------------------------------------------------------------ projects
@@ -194,13 +296,16 @@ async def create_project(req: ScrapeRequest) -> dict:
     name = req.name or req.urls[0].split("://", 1)[1].rstrip("/")[:120]
     if len(req.urls) > 1 and not req.name:
         name += f" +{len(req.urls) - 1}"
+    uid = local_user_id()
     with session() as s:
-        p = Project(user_id=local_user_id(), name=name, source_url=req.urls[0],
+        p = Project(user_id=uid, name=name, source_url=req.urls[0],
                     config=json.loads(req.model_dump_json()), scraping_status="queued")
         s.add(p)
         s.flush()
-        job = _start_job(s, p, req)
-        return {"project_id": p.id, "job_id": job.id}
+        job = _new_job(s, p)
+        pid, jid = p.id, job.id
+    await _dispatch(_run_scrape(pid, jid, req))
+    return {"project_id": pid, "job_id": jid}
 
 
 @app.post("/api/discover", dependencies=[Depends(rate_limit)])
@@ -242,11 +347,7 @@ def delete_project(pid: str) -> Response:
         for j in p.jobs:
             JobControl.cancelled.add(j.id)
         s.delete(p)
-    folder = settings.storage_dir / pid
-    if folder.exists() and folder.resolve().is_relative_to(settings.storage_dir.resolve()):
-        for f in sorted(folder.rglob("*"), reverse=True):
-            f.unlink() if f.is_file() else f.rmdir()
-        folder.rmdir()
+    get_storage().delete_prefix(pid)
     return Response(status_code=204)
 
 
@@ -259,8 +360,10 @@ async def rescrape(pid: str) -> dict:
         req = ScrapeRequest(**p.config)
         for pg in list(p.pages):
             s.delete(pg)
-        job = _start_job(s, p, req)
-        return {"project_id": p.id, "job_id": job.id}
+        job = _new_job(s, p)
+        jid = job.id
+    await _dispatch(_run_scrape(pid, jid, req))
+    return {"project_id": pid, "job_id": jid}
 
 
 @app.post("/api/projects/{pid}/cancel")
@@ -291,13 +394,14 @@ def project_text(pid: str) -> str:
 
 
 @app.get("/api/projects/{pid}/preview.png")
-def project_preview(pid: str) -> FileResponse:
+def project_preview(pid: str) -> Response:
     with session() as s:
         p = _get_project(s, pid)
-        path = p.screenshot_path
-    if not path or not Path(path).exists():
+        key = p.screenshot_path
+    data = get_storage().get(key) if key else None
+    if not data:
         raise HTTPException(404, "No preview available.")
-    return FileResponse(path, media_type="image/png")
+    return Response(data, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
 
 
 # ------------------------------------------------------------------- outputs
@@ -321,10 +425,14 @@ async def create_outputs(pid: str, req: GenerateRequest) -> list[dict]:
             s.add(o)
             s.flush()
             created.append(o)
-        out = [_output_json(o) for o in created]
-    for o in out:
-        _spawn(generation.run_output(o["id"]))
-    return out
+        ids = [o.id for o in created]
+    if settings.job_mode == "inline":
+        await asyncio.gather(*(generation.run_output(i) for i in ids))
+    else:
+        for i in ids:
+            await _dispatch(generation.run_output(i))
+    with session() as s:
+        return [_output_json(_get_output(s, i)) for i in ids]
 
 
 @app.get("/api/outputs")
@@ -385,7 +493,7 @@ async def render_as(oid: str, body: RenderRequest) -> dict:
             generation._set(nid, status="done", stage="Done")
         except Exception as e:  # noqa: BLE001
             generation._set(nid, status="failed", stage="Failed", error_message=f"Rendering failed: {e}")
-    _spawn(_do())
+    await _dispatch(_do())
     with session() as s:
         return _output_json(_get_output(s, nid))
 
@@ -401,7 +509,7 @@ async def regenerate(oid: str, body: RegenerateRequest) -> dict:
         if body.section and o.kind != "ai":
             raise HTTPException(400, "Section rewrites are only available for AI outputs.")
         o.status, o.stage = "queued", "Queued"
-    _spawn(generation.regenerate(oid, body.section, body.instructions))
+    await _dispatch(generation.regenerate(oid, body.section, body.instructions))
     with session() as s:
         return _output_json(_get_output(s, oid))
 
@@ -418,15 +526,14 @@ def download(oid: str, format: str | None = None) -> Response:
             name = safe_filename(o.title or "extraction") + "." + generation.EXT[format]
             return Response(table_to_file(table, format, o.title), media_type=generation.MIME[format],
                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
-        if not o.file_path or not Path(o.file_path).exists():
-            raise HTTPException(404, "The file isn't ready.")
+        key = o.file_path
         fmt = generation.file_format(o)
-        path = Path(o.file_path)
         name = safe_filename(o.title or o.format) + "." + generation.EXT[fmt]
-    if not path.resolve().is_relative_to(settings.storage_dir.resolve()):
-        raise HTTPException(403, "Invalid file location.")
-    return FileResponse(path, media_type=generation.MIME[fmt],
-                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+    data = get_storage().get(key) if key else None
+    if data is None:
+        raise HTTPException(404, "The file isn't ready (or it is no longer stored). Regenerate it.")
+    return Response(data, media_type=generation.MIME[fmt],
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
 
 
 @app.get("/api/outputs/{oid}/preview.html")
@@ -448,9 +555,10 @@ def preview_html(oid: str) -> Response:
 def delete_output(oid: str) -> Response:
     with session() as s:
         o = _get_output(s, oid)
-        if o.file_path and Path(o.file_path).exists():
-            Path(o.file_path).unlink()
+        key = o.file_path
         s.delete(o)
+    if key:
+        get_storage().delete(key)
     return Response(status_code=204)
 
 
@@ -504,14 +612,15 @@ async def create_chat(body: ChatMessageIn) -> dict:
     from .ai.agent import chat_title
     if not ai_status()["configured"]:
         raise HTTPException(503, AIError("not_configured").args[0])
+    uid = local_user_id()
     with session() as s:
-        c = ChatSession(user_id=local_user_id(), title=chat_title(body.message),
+        c = ChatSession(user_id=uid, title=chat_title(body.message),
                         messages=[{"role": "user", "content": body.message}], status="running",
                         status_detail="Thinking…")
         s.add(c)
         s.flush()
         cid = c.id
-    _spawn(_run_agent(cid))
+    await _dispatch(_run_agent(cid))
     with session() as s:
         return _chat_json(s.get(ChatSession, cid))
 
@@ -528,7 +637,7 @@ async def send_message(cid: str, body: ChatMessageIn) -> dict:
             raise HTTPException(409, "The assistant is still working on your last message.")
         c.messages = list(c.messages or []) + [{"role": "user", "content": body.message}]
         c.status, c.status_detail = "running", "Thinking…"
-    _spawn(_run_agent(cid))
+    await _dispatch(_run_agent(cid))
     with session() as s:
         return _chat_json(s.get(ChatSession, cid))
 

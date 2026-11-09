@@ -209,7 +209,7 @@ async function viewHome() {
                same_domain: $("#c_same").checked, use_sitemap: $("#c_sitemap").checked, respect_robots: $("#c_robots").checked },
       data_extraction: fields.length ? { item_selector: $("#d_item").value.trim() || null, fields } : null,
     };
-    go.disabled = true; go.replaceChildren(h("span", { class: "spinner" }), "Starting");
+    go.disabled = true; go.replaceChildren(h("span", { class: "spinner" }), CONFIG?.deployment?.job_mode === "inline" ? "Scraping… (up to a few minutes)" : "Starting");
     try {
       const r = await api("/api/projects", { method: "POST", body });
       location.hash = `#/p/${r.project_id}`;
@@ -557,7 +557,7 @@ async function viewConfigure(pid) {
       audience: F.audience.value.trim() || null, tone: F.tone.value.trim() || null, focus: F.focus.value.trim() || null,
       instructions: F.instructions.value.trim() || null, page_ids,
     };
-    genBtn.disabled = true; genBtn.replaceChildren(h("span", { class: "spinner" }), "Starting");
+    genBtn.disabled = true; genBtn.replaceChildren(h("span", { class: "spinner" }), CONFIG?.deployment?.job_mode === "inline" ? "Generating…" : "Starting");
     try {
       const outs = await api(`/api/projects/${pid}/outputs`, { method: "POST", body: { items, options } });
       location.hash = outs.length === 1 ? `#/o/${outs[0].id}` : `#/history?project=${pid}`;
@@ -823,12 +823,22 @@ async function viewChat(cid) {
   async function submit() {
     const text = input.value.trim();
     if (!text) return;
-    send.disabled = true;
+    const before = chat;
+    const isNew = !chat;
+    // show the message immediately; on serverless the request returns only when the work is done
+    chat = { ...(chat || { id: null, title: text }), messages: [...(chat?.messages || []), { role: "user", content: text }],
+             status: "running", status_detail: "Working on it… this can take a minute" };
+    input.value = ""; draw();
     try {
-      if (!chat) { chat = await api("/api/chats", { method: "POST", body: { message: text } }); history.replaceState(null, "", `#/chat/${chat.id}`); chats.unshift(chat); drawSide(); }
-      else chat = await api(`/api/chats/${chat.id}/messages`, { method: "POST", body: { message: text } });
-      input.value = ""; draw(); poll();
-    } catch (e) { toast(e.message, true); send.disabled = false; }
+      const res = isNew ? await api("/api/chats", { method: "POST", body: { message: text } })
+                        : await api(`/api/chats/${before.id}/messages`, { method: "POST", body: { message: text } });
+      chat = res;
+      if (isNew) { history.replaceState(null, "", `#/chat/${chat.id}`); chats.unshift(chat); drawSide(); }
+      draw();
+      if (chat.status === "running") poll();
+    } catch (e) {
+      toast(e.message, true); chat = before; input.value = text; draw();
+    }
   }
   send.onclick = submit;
   input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } };
@@ -930,6 +940,12 @@ async function viewHistory() {
     pill.className = "pill " + (CONFIG.ai.configured ? "ok" : "");
     pill.replaceChildren(h("span", { class: "dot" }), CONFIG.ai.configured ? `AI: ${CONFIG.ai.provider}` : "AI off");
     pill.title = CONFIG.ai.configured ? `Model: ${CONFIG.ai.model}` : "Add an API key in .env to enable AI outputs";
+    const dep = CONFIG.deployment || {};
+    const msgs = [...(dep.problems || []).map((t) => ["bad", t]), ...(dep.warnings || []).map((t) => ["warn", t])];
+    if (msgs.length) {
+      document.querySelector(".topbar").after(h("div", { class: "deploy-banner" },
+        ...msgs.map(([cls, t]) => h("div", { class: "alert " + cls + " small", role: "alert" }, h("b", { text: cls === "bad" ? "Setup needed: " : "Note: " }), t))));
+    }
   } catch { /* shown per-view */ }
   route();
 })();
