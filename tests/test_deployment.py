@@ -305,17 +305,29 @@ def test_stale_jobs_are_reaped_not_left_spinning():
 
 
 def test_direct_url_used_only_for_schema(tmp_path):
+    """Like Neon: two URLs (pooled for the app, direct for DDL) reaching the same database."""
     out = run_app("""
         import json
+        from sqlalchemy import event
+        from sqlalchemy.engine import Engine
+        ddl_urls, write_urls = set(), set()
+
+        @event.listens_for(Engine, "before_cursor_execute")
+        def _record(conn, cursor, statement, params, context, executemany):
+            verb = statement.lstrip().split(None, 1)[0].upper()
+            if verb == "CREATE":
+                ddl_urls.add(str(conn.engine.url))
+            elif verb in ("INSERT", "UPDATE", "DELETE"):
+                write_urls.add(str(conn.engine.url))
+
         from app.config import settings
-        from app.db import ensure_db, engine
-        import sqlalchemy as sa
+        from app.db import ensure_db, engine, local_user_id
         ensure_db()
-        direct = sa.create_engine(settings.database_url_direct)
-        with direct.connect() as c:
-            tables = sorted(r[0] for r in c.execute(sa.text("select name from sqlite_master where type='table'")))
-        print("RESULT=" + json.dumps({"app": str(engine.url), "direct": settings.database_url_direct, "tables": tables}))
-    """, {"DATABASE_URL": f"sqlite:///{tmp_path}/pooled.db", "DATABASE_URL_UNPOOLED": f"sqlite:///{tmp_path}/direct.db"})
-    # tables are created through the direct URL; the app engine keeps the pooled URL
-    assert out["app"].endswith("pooled.db") and out["direct"].endswith("direct.db")
-    assert "projects" in out["tables"] and "stored_files" in out["tables"]
+        local_user_id()
+        print("RESULT=" + json.dumps({"app": str(engine.url), "direct": settings.database_url_direct,
+                                      "ddl": sorted(ddl_urls), "writes": sorted(write_urls)}))
+    """, {"DATABASE_URL": f"sqlite:///{tmp_path}/neon.db",
+          "DATABASE_URL_UNPOOLED": f"sqlite:///{tmp_path}/neon.db?timeout=30"})
+    assert out["direct"].endswith("neon.db?timeout=30") and out["app"].endswith("neon.db")
+    assert out["ddl"] == [out["direct"]]          # every CREATE TABLE went over the direct URL
+    assert out["writes"] == [out["app"]]          # application writes (the local user row) use the pooled URL
