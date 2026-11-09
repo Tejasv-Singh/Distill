@@ -1,15 +1,22 @@
-"""Database models (SQLAlchemy 2). SQLite by default, PostgreSQL via DATABASE_URL."""
+"""Database models (SQLAlchemy 2). SQLite for local development, PostgreSQL via DATABASE_URL.
+
+Nothing here touches the filesystem at import time: the engine connects lazily and
+`ensure_db()` creates the SQLite directory (if any) and the tables on first use."""
 from __future__ import annotations
 
+import threading
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Iterator
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, create_engine, event
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
-from .config import settings
+from .config import ensure_dir, settings
 
 
 def _id() -> str:
@@ -113,27 +120,82 @@ class ChatSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
-_connect_args ={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=_connect_args, pool_pre_ping=True)
+class StoredFile(Base):
+    """Generated files and screenshots when STORAGE_BACKEND=database (the serverless default).
+    Keeps files next to the data that references them, so any instance can serve them."""
+    __tablename__ = "stored_files"
+    key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    mime: Mapped[str] = mapped_column(String(200), default="application/octet-stream")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
-if settings.database_url.startswith("sqlite"):
-    @event.listens_for(engine, "connect")
-    def _sqlite_pragmas(dbapi_conn, _):  # noqa: ANN001
-        cur = dbapi_conn.cursor()
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.close()
 
+def _make_engine():  # noqa: ANN202
+    url = settings.database_url
+    if url.startswith("sqlite"):
+        eng = create_engine(url, connect_args={"check_same_thread": False}, pool_pre_ping=True)
+
+        @event.listens_for(eng, "connect")
+        def _sqlite_pragmas(dbapi_conn, _):  # noqa: ANN001
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.close()
+        return eng
+    # prepare_threshold=None: psycopg 3 otherwise creates server-side prepared statements, which
+    # break behind transaction-mode poolers (PgBouncer, Neon "-pooler", Supabase pooler) with
+    # "prepared statement _pg3_0 already exists". Those poolers are the norm for serverless.
+    pg_args = {"connect_timeout": 10, "prepare_threshold": None}
+    if settings.serverless:
+        # Instances are frozen between requests, so pooled connections go stale. Open a
+        # connection per unit of work and let the provider's pooler do the pooling.
+        return create_engine(url, poolclass=NullPool, connect_args=pg_args)
+    return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=5, pool_recycle=1800,
+                         connect_args=pg_args)
+
+
+engine = _make_engine()
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 LOCAL_USER_EMAIL = "local@distill"
+_init_lock = threading.Lock()
+_initialized = False
 
 
-def init_db() -> None:
-    Base.metadata.create_all(engine)
-    with session() as s:
-        if not s.query(User).filter_by(email=LOCAL_USER_EMAIL).first():
-            s.add(User(email=LOCAL_USER_EMAIL, name="Local user"))
+def _sqlite_path() -> Path | None:
+    url = settings.database_url
+    if not url.startswith("sqlite:///") or url in ("sqlite://", "sqlite:///:memory:"):
+        return None
+    return Path(url[len("sqlite:///"):])
+
+
+def ensure_db() -> None:
+    """Idempotent: create the SQLite directory, tables and the local user on first use."""
+    global _initialized
+    if _initialized:
+        return
+    with _init_lock:
+        if _initialized:
+            return
+        path = _sqlite_path()
+        if path is not None:
+            ensure_dir(path.parent)
+        try:
+            Base.metadata.create_all(engine)
+        except (OperationalError, ProgrammingError):
+            # another instance created the tables at the same moment; retry once
+            Base.metadata.create_all(engine)
+        try:
+            with session() as s:
+                if not s.query(User).filter_by(email=LOCAL_USER_EMAIL).first():
+                    s.add(User(email=LOCAL_USER_EMAIL, name="Local user"))
+        except IntegrityError:
+            pass  # created concurrently by another instance
+        _initialized = True
+
+
+init_db = ensure_db  # backwards-compatible name
 
 
 @contextmanager
