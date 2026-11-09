@@ -34,6 +34,24 @@ URL(s) ──► fetch (static or headless browser, SSRF-guarded)
 | **History** | Projects, generated files, search, rename, delete, re-download, re-scrape. |
 | **UI** | Light and dark themes, responsive down to phone width, keyboard-accessible, no placeholder buttons. |
 
+## AI assistant (chat)
+
+Open **Assistant** in the top bar, give it a URL and describe what you want in plain English:
+
+> `https://books.toscrape.com`: title, price and star rating of every book on the first 3 pages
+
+The assistant scrapes the site, follows pagination when you ask for "all pages", extracts
+exactly those fields into a table, and shows a preview with **CSV / XLSX / JSON** downloads.
+Then keep talking to refine it: *"also add the availability"*, *"only books under £20"*,
+*"split price into amount and currency"*, *"export as Excel"*, or ask questions about the page.
+
+How it works: a tool-calling agent (Anthropic or OpenAI) with four tools: `scrape_website`,
+`get_page_content`, `extract_data` and `export`. Extraction reads each page in chunks with a fixed
+column set, merges and de-duplicates rows, and **flags values that don't appear word-for-word
+on the page**. For safety, the agent can **only visit sites whose address you typed**. A
+page telling it to fetch another URL is refused, and all scraped text is treated as untrusted
+data. Needs an AI key in `.env`.
+
 ## Quick start
 
 Requires **Python 3.10+**.
@@ -118,6 +136,7 @@ Interactive docs are at **`/docs`** (OpenAPI). Main endpoints:
 | `POST /api/projects/{id}/rescrape` · `/cancel` | Retry or cancel |
 | `GET /api/projects/{id}/pages/{page_id}` | The stored standard document |
 | `GET /api/projects/{id}/text` · `/preview.png` | All extracted text / screenshot |
+| `POST /api/chats` · `POST /api/chats/{id}/messages` | Talk to the extraction assistant (`{message}`); poll `GET /api/chats/{id}` for steps and results |
 | `POST /api/projects/{id}/outputs` | Generate one or more outputs: `{items:[{kind: convert\|ai, format, download_format?}], options{…}}` |
 | `GET /api/outputs` / `GET /api/outputs/{id}` | All generated files / one output with its content |
 | `PUT /api/outputs/{id}` | Save edited Markdown and rebuild the file |
@@ -196,10 +215,11 @@ in `app/ai/providers.py`.
 python -m pytest -q
 ```
 
-There are 59 tests covering URL validation and SSRF (private ranges, metadata IP, redirects to internal
+There are 65 tests covering URL validation and SSRF (private ranges, metadata IP, redirects to internal
 hosts), bot-wall detection, extraction on every demo page type, table captions and headers,
 inline code, JavaScript rendering, the AI pipeline (with a fake LLM: citation cleanup,
-invented-number detection, injection flagging, map-reduce chunking, section rewrites), every
+invented-number detection, injection flagging, map-reduce chunking, section rewrites), the chat
+assistant (scripted LLM: scrape → extract → refine → export, the host restriction, provider message formats), every
 exporter (files are re-opened with their libraries), and full API workflows (crawl, pagination,
 records, multi-output generation, edit, re-render, history, delete, error states).
 
