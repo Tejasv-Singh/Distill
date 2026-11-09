@@ -34,7 +34,9 @@ _sem = asyncio.Semaphore(max(1, settings.max_concurrent_jobs))
 
 
 def file_format(o: GeneratedOutput) -> str:
-    return o.format if o.kind == "convert" else (o.configuration.get("download_format") or "markdown")
+    if o.kind in ("convert", "extract"):
+        return o.format
+    return o.configuration.get("download_format") or "markdown"
 
 
 def output_path(o: GeneratedOutput) -> Path:
@@ -168,10 +170,34 @@ async def rerender(oid: str) -> None:
         o.warnings = [w for w in (o.warnings or []) if "figures" in w or "instructions" in w] + warnings
 
 
+async def rerun_extraction(oid: str, extra: str | None) -> None:
+    from .ai.extract import extract_table, table_to_file
+    with session() as s:
+        o = s.get(GeneratedOutput, oid)
+        cfg, project_id = dict(o.configuration), o.project_id
+    instruction = cfg["instruction"] + (f"\n{extra}" if extra else "")
+    try:
+        _set(oid, status="running", stage="Extracting")
+        _, docs = load_docs(project_id, cfg.get("page_ids") or None)
+        cols = [c for c in cfg.get("columns", []) if c != "source_url"] if not extra else None
+        table = await extract_table(docs, instruction, cols, progress=lambda m: _set(oid, stage=m))
+        with session() as s:
+            o = s.get(GeneratedOutput, oid)
+            o.generated_content = json.dumps({"columns": table["columns"], "rows": table["rows"]}, ensure_ascii=False, default=str)
+            o.configuration = {**cfg, "instruction": instruction, "columns": table["columns"], "stats": table["stats"]}
+            o.warnings, o.status, o.stage, o.error_message = table["warnings"], "done", "Done", None
+            output_path(o).write_bytes(table_to_file(table, o.format, o.title))
+    except Exception as e:  # noqa: BLE001
+        _set(oid, status="failed", stage="Failed", error_message=f"Extraction failed: {e}")
+
+
 async def regenerate(oid: str, section: str | None, extra: str | None) -> None:
     with session() as s:
         o = s.get(GeneratedOutput, oid)
         kind, project_id, opts, md = o.kind, o.project_id, dict(o.configuration), o.generated_content or ""
+    if kind == "extract":
+        await rerun_extraction(oid, extra)
+        return
     if section and kind == "ai":
         _set(oid, status="running", stage=f"Rewriting “{section}”")
         try:
