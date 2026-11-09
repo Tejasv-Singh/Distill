@@ -12,7 +12,7 @@ from ..config import settings
 from ..db import Project, ScrapedPage, ScrapingJob, session
 from ..schemas import ScrapeRequest
 from ..security import UnsafeURL, resolve_public
-from .discovery import Robots, discover_sitemap_urls, is_crawlable, url_passes
+from .discovery import Robots, discover_sitemap_urls, find_next_link, is_crawlable, url_passes
 from .extractor import extract_document, page_links
 from .fetcher import FetchError, Fetcher
 from .selectors import extract_rows
@@ -165,7 +165,11 @@ async def run_scrape_job(project_id: str, job_id: str, req: ScrapeRequest) -> No
             # queue more pages
             if req.mode == "crawl":
                 candidates: list[tuple[str, int, bool]] = []
-                if crawl.next_page_selector:
+                if crawl.next_page_selector == "auto":
+                    nxt = find_next_link(page.html, page.url)
+                    if nxt:
+                        candidates.append((nxt, depth, True))
+                elif crawl.next_page_selector:
                     for u in page_links(page.html, page.url, crawl.next_page_selector)[:1]:
                         candidates.append((u, depth, True))   # pagination doesn't add depth
                 if depth < max_depth:

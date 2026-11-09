@@ -114,3 +114,23 @@ _SKIP_EXT = re.compile(r"\.(png|jpe?g|gif|webp|svg|ico|css|js|mjs|json|xml|pdf|z
 
 def is_crawlable(url: str) -> bool:
     return url.startswith(("http://", "https://")) and not _SKIP_EXT.search(urlsplit(url).path)
+
+
+_NEXT_TEXT = re.compile(r"^\s*(next|next page|older posts|more|›|»|→|>|>>|next\s*[›»→>])\s*$", re.I)
+
+
+def find_next_link(html: str, base: str) -> str | None:
+    """Detect a pagination "next" link without a selector: rel=next, aria-label, class or text."""
+    from urllib.parse import urljoin
+    soup = BeautifulSoup(html, "lxml")
+    cand = soup.select_one('a[rel~="next"], link[rel~="next"]')
+    if not cand:
+        for a in soup.find_all("a", href=True):
+            label = (a.get("aria-label") or "") + " " + " ".join(a.get("class") or []) + " " + \
+                    " ".join((a.parent.get("class") or []) if a.parent else [])
+            if re.search(r"\bnext\b", label, re.I) or _NEXT_TEXT.match(a.get_text(" ", strip=True)):
+                cand = a
+                break
+    if cand and cand.get("href") and not cand["href"].startswith(("#", "javascript:")):
+        return urljoin(base, cand["href"]).split("#")[0]
+    return None
