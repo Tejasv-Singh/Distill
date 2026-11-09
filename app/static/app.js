@@ -99,12 +99,13 @@ const LABEL = Object.fromEntries([...Object.values(FORMATS).flat(), ...AI_OUT].m
 const routes = [
   [/^#?\/?$/, viewHome], [/^#\/history(?:\?.*)?$/, viewHistory], [/^#\/p\/(\w+)$/, viewProject],
   [/^#\/p\/(\w+)\/new$/, viewConfigure], [/^#\/o\/(\w+)$/, viewOutput],
+  [/^#\/chat$/, () => viewChat(null)], [/^#\/chat\/(\w+)$/, viewChat],
 ];
 async function route() {
   clearTimers();
   const hash = location.hash || "#/";
   document.querySelectorAll("[data-nav]").forEach((a) =>
-    a.classList.toggle("on", (a.dataset.nav === "home" && (hash === "#/" || hash === "")) || (a.dataset.nav === "history" && hash.startsWith("#/history"))));
+    a.classList.toggle("on", (a.dataset.nav === "home" && (hash === "#/" || hash === "")) || (a.dataset.nav === "history" && hash.startsWith("#/history")) || (a.dataset.nav === "chat" && hash.startsWith("#/chat"))));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
     if (m) {
@@ -222,7 +223,8 @@ async function viewHome() {
       h("span", { class: "pill accent", style: "margin-bottom:16px" }, "Scrape once · export everything"),
       h("h1", {}, "Turn any website into anything."),
       h("p", { class: "lead", text: "Paste a URL. Distill extracts the real content (headings, tables, images, links) and turns it into documents, spreadsheets, slides or AI-written reports." }),
-      form),
+      form,
+      h("p", { class: "small muted", style: "margin-top:14px" }, "Want specific data? ", h("a", { href: "#/chat", text: "Ask the AI assistant →" }), " e.g. “every product's name and price from this page”.")),
     h("div", { class: "section-title" }, h("h2", { text: "Recent projects" }), h("a", { href: "#/history", class: "small", text: "View all →" })),
     recent,
     h("div", { class: "section-title" }, h("h2", { text: "How it works" })),
@@ -458,7 +460,7 @@ function outputRow(o) {
   return h("div", { class: "item" },
     h("span", { class: "badge", text: o.file_format === "markdown" ? "md" : o.file_format }),
     h("div", { style: "flex:1;min-width:0" }, h("a", { href: `#/o/${o.id}`, class: "trunc", style: "display:block;font-weight:550", text: o.title || LABEL[o.format] || o.format }),
-      h("div", { class: "tiny muted", text: `${o.kind === "ai" ? "AI · " + (LABEL[o.format] || o.format) : "Conversion"} · ${ago(o.created_at)}` })),
+      h("div", { class: "tiny muted", text: `${o.kind === "ai" ? "AI · " + (LABEL[o.format] || o.format) : o.kind === "extract" ? "AI extraction" : "Conversion"} · ${ago(o.created_at)}` })),
     o.status === "done" ? null : statusPill(o.status),
     o.has_file ? h("a", { class: "btn small", href: `/api/outputs/${o.id}/download`, text: "Download" }) : null);
 }
@@ -627,7 +629,7 @@ async function viewOutput(oid) {
       h("div", { class: "row small muted", style: "margin-bottom:8px" }, h("a", { href: `#/p/${project.id}`, text: "← " + project.name })),
       h("div", { class: "ws-head" },
         h("div", { style: "min-width:0" }, h("div", { class: "row", style: "margin-bottom:6px" }, h("span", { class: "badge", text: o.file_format === "markdown" ? "md" : o.file_format }),
-          h("span", { class: "small muted", text: o.kind === "ai" ? `AI · ${LABEL[o.format]}` : "Direct conversion" }), statusPill(o.status)),
+          h("span", { class: "small muted", text: o.kind === "ai" ? `AI · ${LABEL[o.format]}` : o.kind === "extract" ? "AI extraction" : "Direct conversion" }), statusPill(o.status)),
           h("h1", { text: o.title || LABEL[o.format] })),
         h("div", { class: "row wrap" }, o.has_file && !running ? h("a", { class: "btn primary", href: `/api/outputs/${oid}/download`, text: "Download" }) : null)),
       o.warnings?.length && !running ? h("div", { class: "alert warn small", style: "margin-bottom:16px" }, h("b", { text: "Check before using" }), h("ul", {}, ...o.warnings.map((w) => h("li", { text: w })))) : null,
@@ -639,6 +641,16 @@ async function viewOutput(oid) {
   }
   function dataPreview() {
     const fmt = o.file_format;
+    if (o.kind === "extract") {
+      let t = { columns: [], rows: [] };
+      try { t = JSON.parse(o.content || "{}"); } catch { /* keep empty */ }
+      return h("div", {},
+        h("p", { class: "small muted", style: "margin:0 0 10px" }, "Instruction: ", h("i", { text: o.configuration.instruction || "" })),
+        h("div", { class: "row wrap", style: "margin-bottom:10px" }, h("span", { class: "small muted", text: `${t.rows.length} rows × ${t.columns.length} columns · download as` }),
+          ...["csv", "xlsx", "json", "markdown"].map((f) => h("a", { class: "btn small", href: `/api/outputs/${oid}/download?format=${f}`, text: f.toUpperCase() }))),
+        dataTable(t.columns, t.rows.slice(0, 500).map((r) => t.columns.map((c) => cellText(r[c])))),
+        t.rows.length > 500 ? h("p", { class: "tiny muted", text: `Showing 500 of ${t.rows.length} rows.` }) : null);
+    }
     if (fmt === "csv" || fmt === "xlsx") {
       const sheets = (o.content || "").split(/^## /m).filter(Boolean);
       const parse = (txt) => { const rows = []; let row = [], cur = "", q = false;
@@ -668,7 +680,8 @@ async function viewOutput(oid) {
           o.kind === "ai" && sections.length ? fld("Only this section", secSel, "optional") : null,
           o.kind === "ai" && sections.length ? h("label", { class: "check small" }, h("input", { type: "checkbox", id: "secOnly" }), "Rewrite just this section") : null,
           o.kind === "ai" ? instr : null,
-          h("button", { class: "btn", text: o.kind === "ai" ? "Regenerate" : "Rebuild from scrape", onclick: () => regen($("#secOnly")?.checked ? secSel.value : null, instr.value.trim() || null) }))) : null,
+          o.kind === "extract" ? h("textarea", { rows: 3, id: "exInstr", placeholder: "Optional: what should change? e.g. “also include the rating”" }) : null,
+          h("button", { class: "btn", text: o.kind === "ai" ? "Regenerate" : o.kind === "extract" ? "Re-extract" : "Rebuild from scrape", onclick: () => regen($("#secOnly")?.checked ? secSel.value : null, (o.kind === "extract" ? $("#exInstr").value : instr.value).trim() || null) }))) : null,
       h("div", { class: "card" }, h("h3", { text: "Details" }),
         h("dl", { class: "kv small" }, kv("Created", ago(o.created_at)), kv("Style", o.kind === "ai" ? o.configuration.style : null), kv("Detail", o.kind === "ai" ? o.configuration.detail : null),
           kv("Pages used", o.configuration.page_ids?.length || project.pages.length), kv("Strategy", o.configuration.ai_stats?.strategy),
@@ -693,6 +706,161 @@ async function viewOutput(oid) {
   }
   render();
   if (["queued", "running"].includes(o.status)) pollIt();
+}
+
+// ---------------------------------------------------------------- assistant
+const cellText = (v) => (v == null ? "" : Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v));
+
+/* Safe mini-Markdown for assistant replies: paragraphs, lists, **bold**, *italic*, `code`, links, tables.
+   Builds DOM nodes; never uses innerHTML. */
+function mdLite(text) {
+  const root = h("div", { class: "md" });
+  const inline = (s) => {
+    const out = [];
+    const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\((?:https?:\/\/|\/)[^)\s]+\)|\*[^*\s][^*]*\*)/g;
+    let last = 0, m;
+    while ((m = re.exec(s))) {
+      if (m.index > last) out.push(s.slice(last, m.index));
+      const t = m[0];
+      if (t.startsWith("**")) out.push(h("strong", { text: t.slice(2, -2) }));
+      else if (t.startsWith("`")) out.push(h("code", { text: t.slice(1, -1) }));
+      else if (t.startsWith("[")) { const mm = t.match(/^\[([^\]]+)\]\(([^)]+)\)$/); out.push(h("a", { href: mm[2], target: mm[2].startsWith("/") ? null : "_blank", rel: "noopener noreferrer nofollow", text: mm[1] })); }
+      else out.push(h("em", { text: t.slice(1, -1) }));
+      last = m.index + t.length;
+    }
+    if (last < s.length) out.push(s.slice(last));
+    return out;
+  };
+  const lines = (text || "").replace(/\r/g, "").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?[\s:-]+\|/.test(lines[i + 1])) {
+      const split = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      const head = split(line); const rows = []; i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(split(lines[i++]));
+      root.append(dataTable(head, rows)); continue;
+    }
+    if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\./.test(line); const list = h(ordered ? "ol" : "ul");
+      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) list.append(h("li", {}, ...inline(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, ""))));
+      root.append(list); continue;
+    }
+    if (/^#{1,6}\s/.test(line)) { root.append(h("p", {}, h("strong", { text: line.replace(/^#+\s*/, "") }))); i++; continue; }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !/^\s*([-*]|\d+\.)\s+/.test(lines[i]) && !/^\s*\|/.test(lines[i])) para.push(lines[i++]);
+    root.append(h("p", {}, ...inline(para.join(" "))));
+  }
+  return root;
+}
+
+const STEP_LABEL = { scrape_website: "Scraping", get_page_content: "Reading page", extract_data: "Extracting data", export: "Creating file" };
+
+function stepCard(m, running) {
+  const d = m.display;
+  if (!d) return h("div", { class: "step" }, h("span", { class: "spinner" }), h("span", { text: (STEP_LABEL[m.tool] || m.tool) + "…" }));
+  if (d.type === "error") return h("div", { class: "step bad" }, h("span", { class: "dot-ic", text: "!" }), h("span", { text: d.text }));
+  if (d.type === "scrape") return h("div", { class: "step" }, h("span", { class: "dot-ic ok", text: "✓" }),
+    h("span", {}, `Scraped ${d.pages} page${d.pages === 1 ? "" : "s"} from `, h("b", { text: d.host }), ` · ${fmtNum(d.words)} words` + (d.errors ? ` · ${d.errors} skipped` : "")),
+    h("a", { class: "small", href: `#/p/${d.project_id}`, text: "Open project" }));
+  if (d.type === "read") return h("div", { class: "step" }, h("span", { class: "dot-ic ok", text: "✓" }), h("span", {}, "Read ", h("i", { text: d.title })));
+  if (d.type === "export") return h("div", { class: "result-card" },
+    h("div", { class: "row" }, h("span", { class: "badge", text: d.format === "markdown" ? "md" : d.format }), h("b", { class: "trunc", style: "flex:1;max-width:none", text: d.title || "Your file" }),
+      h("a", { class: "btn primary small", href: d.download_url, text: "Download" })));
+  if (d.type === "extract") {
+    const more = d.row_count - d.rows.length;
+    return h("div", { class: "result-card" },
+      h("div", { class: "row wrap", style: "margin-bottom:8px" }, h("b", { text: `${d.row_count} row${d.row_count === 1 ? "" : "s"} × ${d.columns.length} columns` }),
+        h("span", { class: "spacer" }), ...["csv", "xlsx", "json"].map((f) => h("a", { class: "btn small", href: `/api/outputs/${d.output_id}/download?format=${f}`, text: f.toUpperCase() })),
+        h("a", { class: "btn small", href: `#/o/${d.output_id}`, text: "Open table" })),
+      d.rows.length ? dataTable(d.columns, d.rows.map((r) => d.columns.map((c) => cellText(r[c])))) : null,
+      more > 0 ? h("p", { class: "tiny muted", style: "margin:4px 0 0", text: `+ ${more} more rows in the download` }) : null,
+      d.warnings?.length ? h("div", { class: "alert warn small", style: "margin-top:8px" }, ...d.warnings.map((w) => h("div", { text: w }))) : null);
+  }
+  return null;
+}
+
+async function viewChat(cid) {
+  const aiOK = CONFIG?.ai?.configured;
+  let chat = cid ? await api(`/api/chats/${cid}`) : null;
+  let chats = await api("/api/chats").catch(() => []);
+  const thread = h("div", { class: "thread", "aria-live": "polite" });
+  const input = h("textarea", { rows: 2, placeholder: aiOK ? "Paste a URL and say what you want, e.g. “https://books.toscrape.com: every book's title, price and rating from the first 3 pages”" : "Add an AI API key in .env to use the assistant", disabled: !aiOK, "aria-label": "Message" });
+  const send = h("button", { class: "btn primary", text: "Send", disabled: !aiOK });
+  let pollId = null;
+
+  const examples = [
+    ["Product list (demo)", "http://localhost:8765/catalogue/page-1.html: get every book's title, price and availability from all pages"],
+    ["Article facts (demo)", "http://localhost:8765/blog/how-we-pick-books.html: extract the scoring criteria with their weights"],
+    ["Report data (demo)", "http://localhost:8765/reports/sales-2026.html: monthly units and revenue as a table"],
+    ["Real site", "https://books.toscrape.com: title, price and star rating of every book on the first 2 pages"],
+  ];
+
+  function draw() {
+    const running = chat?.status === "running";
+    thread.replaceChildren();
+    if (!chat) {
+      thread.append(h("div", { class: "chat-empty" },
+        h("h1", { text: "What do you want to extract?" }),
+        h("p", { class: "muted", text: "Give me a website and describe the data you want in plain English. I'll scrape it, pull out exactly that, and hand you a table you can refine and download." }),
+        !aiOK ? h("div", { class: "alert info small", style: "margin:16px auto;max-width:560px;text-align:left", text: "The assistant needs an AI key. Add ANTHROPIC_API_KEY (or OPENAI_API_KEY with AI_PROVIDER=openai) to the .env file in your project folder, then restart Distill." }) : null,
+        h("div", { class: "examples" }, ...examples.map(([t, q]) => h("button", { class: "example", disabled: !aiOK, onclick: () => { input.value = q; input.focus(); } },
+          h("b", { text: t }), h("span", { text: q }))))));
+    } else {
+      for (const m of chat.messages) {
+        if (m.role === "user") thread.append(h("div", { class: "msg user" }, h("div", { class: "bubble", text: m.content })));
+        else if (m.role === "assistant") thread.append(h("div", { class: "msg ai" }, mdLite(m.content)));
+        else if (m.role === "error") thread.append(h("div", { class: "msg ai" }, h("div", { class: "alert bad small", text: m.content })));
+        else if (m.role === "step") { const c = stepCard(m, running); if (c) thread.append(h("div", { class: "msg ai" }, c)); }
+      }
+      if (running) thread.append(h("div", { class: "msg ai" }, h("div", { class: "step live" }, h("span", { class: "spinner" }), h("span", { text: chat.status_detail || "Working…" }))));
+    }
+    input.disabled = !aiOK || running; send.disabled = !aiOK || running;
+    requestAnimationFrame(() => thread.lastElementChild?.scrollIntoView({ block: "end" }));
+  }
+
+  async function submit() {
+    const text = input.value.trim();
+    if (!text) return;
+    send.disabled = true;
+    try {
+      if (!chat) { chat = await api("/api/chats", { method: "POST", body: { message: text } }); history.replaceState(null, "", `#/chat/${chat.id}`); chats.unshift(chat); drawSide(); }
+      else chat = await api(`/api/chats/${chat.id}/messages`, { method: "POST", body: { message: text } });
+      input.value = ""; draw(); poll();
+    } catch (e) { toast(e.message, true); send.disabled = false; }
+  }
+  send.onclick = submit;
+  input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } };
+
+  function poll() {
+    if (pollId) return;
+    pollId = every(1000, async () => {
+      try { chat = await api(`/api/chats/${chat.id}`); } catch { return; }
+      draw();
+      if (chat.status !== "running") { clearInterval(pollId); pollId = null; input.focus(); }
+    });
+  }
+
+  const side = h("aside", { class: "chat-side" });
+  function drawSide() {
+    side.replaceChildren(h("a", { class: "btn", href: "#/chat", style: "width:100%", text: "+ New chat" }),
+      h("div", { class: "eyebrow", style: "margin:16px 0 6px", text: "Recent" }),
+      ...(chats.length ? chats.map((c) => h("div", { class: "chat-link" + (chat && c.id === chat.id ? " on" : "") },
+        h("a", { href: `#/chat/${c.id}`, class: "trunc", text: c.title }),
+        h("button", { class: "icon-x", title: "Delete chat", "aria-label": "Delete chat", text: "×", onclick: async () => {
+          await api(`/api/chats/${c.id}`, { method: "DELETE" }); chats = chats.filter((x) => x.id !== c.id);
+          if (chat && chat.id === c.id) location.hash = "#/chat"; else drawSide(); } })))
+        : [h("p", { class: "tiny muted", text: "No chats yet." })]));
+  }
+  drawSide();
+  app.replaceChildren(h("div", { class: "chat-layout fade-in" }, side,
+    h("section", { class: "chat-main" }, thread,
+      h("div", { class: "composer" }, input, send),
+      h("p", { class: "tiny faint", style: "text-align:center;margin:6px 0 0", text: "The assistant only visits sites you type, never bypasses logins or CAPTCHAs, and flags values it couldn't find on the page." }))));
+  draw();
+  if (chat?.status === "running") poll();
+  setTimeout(() => input.focus(), 50);
 }
 
 // -------------------------------------------------------------------- history
