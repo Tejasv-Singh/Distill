@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -27,6 +28,26 @@ class AIError(Exception):
         super().__init__(f"{self.MESSAGES.get(kind, 'AI error.')} {detail}".strip())
 
 
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    input: dict
+
+
+@dataclass
+class AssistantTurn:
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+# Provider-neutral chat messages used by the agent:
+#   {"role": "user", "content": str}
+#   {"role": "assistant", "content": str, "tool_calls": [{"id", "name", "input"}]}
+#   {"role": "tool", "tool_call_id": str, "name": str, "content": str}
+# Tools: [{"name", "description", "parameters": <JSON schema>}]
+
+
 class LLMProvider:
     name = "base"
 
@@ -35,6 +56,11 @@ class LLMProvider:
 
     async def complete(self, system: str, user: str, *, fast: bool = False,
                        max_tokens: int = 4000, temperature: float = 0.3) -> str:
+        raise NotImplementedError
+
+    async def chat(self, system: str, messages: list[dict], tools: list[dict], *,
+                   max_tokens: int = 4000) -> AssistantTurn:
+        """One assistant turn with tool calling."""
         raise NotImplementedError
 
     async def _post(self, url: str, headers: dict, payload: dict) -> dict:
@@ -92,6 +118,45 @@ class AnthropicProvider(LLMProvider):
             raise AIError("context")
         return text
 
+    @staticmethod
+    def to_messages(messages: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for m in messages:
+            if m["role"] == "user":
+                out.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                blocks = [{"type": "text", "text": m["content"]}] if m.get("content") else []
+                blocks += [{"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["input"]}
+                           for c in m.get("tool_calls", [])]
+                out.append({"role": "assistant", "content": blocks or [{"type": "text", "text": "…"}]})
+            elif m["role"] == "tool":
+                block = {"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": m["content"]}
+                # consecutive tool results belong in one user message
+                if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list) \
+                        and out[-1]["content"] and out[-1]["content"][0].get("type") == "tool_result":
+                    out[-1]["content"].append(block)
+                else:
+                    out.append({"role": "user", "content": [block]})
+        return out
+
+    async def chat(self, system, messages, tools, *, max_tokens=4000):  # noqa: ANN001
+        data = await self._post(
+            "https://api.anthropic.com/v1/messages",
+            {"x-api-key": settings.anthropic_api_key or "", "anthropic-version": "2023-06-01",
+             "content-type": "application/json"},
+            {"model": self.model, "max_tokens": max_tokens, "system": system,
+             "messages": self.to_messages(messages),
+             "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+                       for t in tools]},
+        )
+        turn = AssistantTurn()
+        for b in data.get("content", []):
+            if b.get("type") == "text":
+                turn.text += b.get("text", "")
+            elif b.get("type") == "tool_use":
+                turn.tool_calls.append(ToolCall(b["id"], b["name"], b.get("input") or {}))
+        return turn
+
 
 class OpenAIProvider(LLMProvider):
     name = "openai"
@@ -107,6 +172,45 @@ class OpenAIProvider(LLMProvider):
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError) as e:
             raise AIError("bad_output") from e
+
+    @staticmethod
+    def to_messages(system: str, messages: list[dict]) -> list[dict]:
+        out: list[dict] = [{"role": "system", "content": system}]
+        for m in messages:
+            if m["role"] == "user":
+                out.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                msg: dict = {"role": "assistant", "content": m.get("content") or None}
+                if m.get("tool_calls"):
+                    msg["tool_calls"] = [{"id": c["id"], "type": "function",
+                                          "function": {"name": c["name"], "arguments": json.dumps(c["input"])}}
+                                         for c in m["tool_calls"]]
+                out.append(msg)
+            elif m["role"] == "tool":
+                out.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
+        return out
+
+    async def chat(self, system, messages, tools, *, max_tokens=4000):  # noqa: ANN001
+        data = await self._post(
+            settings.openai_base_url.rstrip("/") + "/chat/completions",
+            {"Authorization": f"Bearer {settings.openai_api_key}", "Content-Type": "application/json"},
+            {"model": self.model, "max_completion_tokens": max_tokens,
+             "messages": self.to_messages(system, messages),
+             "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                         "parameters": t["parameters"]}} for t in tools]},
+        )
+        try:
+            msg = data["choices"][0]["message"]
+        except (KeyError, IndexError) as e:
+            raise AIError("bad_output") from e
+        turn = AssistantTurn(text=msg.get("content") or "")
+        for c in msg.get("tool_calls") or []:
+            try:
+                args = json.loads(c["function"].get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            turn.tool_calls.append(ToolCall(c["id"], c["function"]["name"], args))
+        return turn
 
 
 _override: LLMProvider | None = None
