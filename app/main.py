@@ -66,6 +66,9 @@ app = FastAPI(title="Distill API", version="2.0.0", lifespan=lifespan,
 async def security_headers(request: Request, call_next):  # noqa: ANN001, ANN201
     resp = await call_next(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    if not request.url.path.startswith("/api/"):
+        # always revalidate the UI so an updated app.js / index.html is picked up immediately
+        resp.headers.setdefault("Cache-Control", "no-cache")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     if not request.url.path.endswith("/preview.html"):
         resp.headers.setdefault("X-Frame-Options", "DENY")
