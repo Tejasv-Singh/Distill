@@ -15,9 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from . import generation
 from .ai.providers import AIError, ai_status
 from .config import BASE_DIR, settings
-from .db import GeneratedOutput, Project, ScrapedPage, ScrapingJob, init_db, local_user_id, session
+from .db import ChatSession, GeneratedOutput, Project, ScrapedPage, ScrapingJob, init_db, local_user_id, session
 from .exporters.render import render_html
-from .schemas import (AI_TYPES, CONVERT_FORMATS, DiscoverRequest, GenerateRequest, OutputEdit, ProjectPatch,
+from .schemas import (AI_TYPES, CONVERT_FORMATS, ChatMessageIn, DiscoverRequest, GenerateRequest, OutputEdit, ProjectPatch,
                       RegenerateRequest, RenderRequest, ScrapeRequest)
 from .scraping.extractor import document_text
 from .scraping.fetcher import FetchError
@@ -49,6 +49,10 @@ async def lifespan(_: FastAPI):
             p.scraping_status = "failed"
         for o in s.query(GeneratedOutput).filter(GeneratedOutput.status.in_(["queued", "running"])):
             o.status, o.error_message = "failed", "Interrupted by a server restart. Regenerate it."
+        for c in s.query(ChatSession).filter(ChatSession.status == "running"):
+            c.status, c.status_detail = "idle", ""
+            c.messages = list(c.messages or []) + [{"role": "assistant", "content": "", "tool_calls": [],
+                                                    "error": "Interrupted by a server restart. Send your message again."}]
     yield
     for t in list(_tasks):
         t.cancel()
@@ -105,7 +109,7 @@ def _output_json(o: GeneratedOutput, content: bool = False) -> dict:
     d = {"id": o.id, "project_id": o.project_id, "kind": o.kind, "format": o.format,
          "file_format": generation.file_format(o), "title": o.title, "status": o.status, "stage": o.stage,
          "warnings": o.warnings or [], "error_message": o.error_message, "configuration": o.configuration,
-         "editable": generation.file_format(o) in generation.DOC_FORMATS,
+         "editable": o.kind != "extract" and generation.file_format(o) in generation.DOC_FORMATS,
          "has_file": bool(o.file_path and Path(o.file_path).exists()),
          "created_at": _iso(o.created_at), "updated_at": _iso(o.updated_at)}
     if content:
@@ -337,7 +341,7 @@ def get_output(oid: str) -> dict:
 async def edit_output(oid: str, body: OutputEdit) -> dict:
     with session() as s:
         o = _get_output(s, oid)
-        if generation.file_format(o) not in generation.DOC_FORMATS:
+        if o.kind == "extract" or generation.file_format(o) not in generation.DOC_FORMATS:
             raise HTTPException(400, "Data exports (CSV, XLSX, JSON, XML) can't be edited. Regenerate them with new options instead.")
         if o.status != "done":
             raise HTTPException(409, "Wait until generation finishes.")
@@ -357,7 +361,7 @@ async def render_as(oid: str, body: RenderRequest) -> dict:
     """Same content, another document format (a new output, so the original is kept)."""
     with session() as s:
         o = _get_output(s, oid)
-        if generation.file_format(o) not in generation.DOC_FORMATS or o.status != "done":
+        if o.kind == "extract" or generation.file_format(o) not in generation.DOC_FORMATS or o.status != "done":
             raise HTTPException(400, "Only finished document outputs can be converted to another format.")
         cfg = dict(o.configuration)
         if o.kind == "ai":
@@ -389,7 +393,7 @@ async def regenerate(oid: str, body: RegenerateRequest) -> dict:
         o = _get_output(s, oid)
         if o.status in ("queued", "running"):
             raise HTTPException(409, "This output is still being generated.")
-        if o.kind == "ai" and not ai_status()["configured"]:
+        if o.kind in ("ai", "extract") and not ai_status()["configured"]:
             raise HTTPException(503, AIError("not_configured").args[0])
         if body.section and o.kind != "ai":
             raise HTTPException(400, "Section rewrites are only available for AI outputs.")
@@ -400,9 +404,17 @@ async def regenerate(oid: str, body: RegenerateRequest) -> dict:
 
 
 @app.get("/api/outputs/{oid}/download")
-def download(oid: str) -> FileResponse:
+def download(oid: str, format: str | None = None) -> Response:
     with session() as s:
         o = _get_output(s, oid)
+        if o.kind == "extract" and format and format != o.format:
+            from .ai.extract import TABLE_FORMATS_EXT, table_to_file
+            if format not in TABLE_FORMATS_EXT:
+                raise HTTPException(400, f"Tables download as {', '.join(TABLE_FORMATS_EXT)}.")
+            table = json.loads(o.generated_content or '{"columns": [], "rows": []}')
+            name = safe_filename(o.title or "extraction") + "." + generation.EXT[format]
+            return Response(table_to_file(table, format, o.title), media_type=generation.MIME[format],
+                            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
         if not o.file_path or not Path(o.file_path).exists():
             raise HTTPException(404, "The file isn't ready.")
         fmt = generation.file_format(o)
@@ -420,7 +432,7 @@ def preview_html(oid: str) -> Response:
     with session() as s:
         o = _get_output(s, oid)
         md, opts = o.generated_content or "", o.configuration or {}
-        if generation.file_format(o) not in generation.DOC_FORMATS:
+        if o.kind == "extract" or generation.file_format(o) not in generation.DOC_FORMATS:
             raise HTTPException(400, "No document preview for data exports.")
     html = render_html(md, opts)
     return Response(html, media_type="text/html; charset=utf-8", headers={
@@ -436,6 +448,95 @@ def delete_output(oid: str) -> Response:
         if o.file_path and Path(o.file_path).exists():
             Path(o.file_path).unlink()
         s.delete(o)
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------- chat
+def _chat_json(c: ChatSession, full: bool = True) -> dict:
+    d = {"id": c.id, "title": c.title, "status": c.status, "status_detail": c.status_detail,
+         "created_at": _iso(c.created_at), "updated_at": _iso(c.updated_at)}
+    if full:
+        out = []
+        for m in c.messages or []:
+            if m["role"] == "user":
+                out.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                if m.get("error"):
+                    out.append({"role": "error", "content": m["error"]})
+                elif m.get("content"):
+                    out.append({"role": "assistant", "content": m["content"]})
+                for tc in m.get("tool_calls") or []:
+                    out.append({"role": "step", "tool": tc["name"], "id": tc["id"], "display": None})
+            elif m["role"] == "tool":
+                for item in reversed(out):
+                    if item["role"] == "step" and item["id"] == m["tool_call_id"]:
+                        item["display"] = m.get("display")
+                        break
+        d["messages"] = out
+    return d
+
+
+async def _run_agent(chat_id: str) -> None:
+    from .ai.agent import Agent
+    await Agent(chat_id).run()
+
+
+@app.get("/api/chats")
+def list_chats() -> list[dict]:
+    with session() as s:
+        return [_chat_json(c, full=False) for c in s.query(ChatSession).order_by(ChatSession.updated_at.desc()).limit(100)]
+
+
+@app.get("/api/chats/{cid}")
+def get_chat(cid: str) -> dict:
+    with session() as s:
+        c = s.get(ChatSession, cid)
+        if not c:
+            raise HTTPException(404, "Chat not found.")
+        return _chat_json(c)
+
+
+@app.post("/api/chats", status_code=201, dependencies=[Depends(rate_limit)])
+async def create_chat(body: ChatMessageIn) -> dict:
+    from .ai.agent import chat_title
+    if not ai_status()["configured"]:
+        raise HTTPException(503, AIError("not_configured").args[0])
+    with session() as s:
+        c = ChatSession(user_id=local_user_id(), title=chat_title(body.message),
+                        messages=[{"role": "user", "content": body.message}], status="running",
+                        status_detail="Thinking…")
+        s.add(c)
+        s.flush()
+        cid = c.id
+    _spawn(_run_agent(cid))
+    with session() as s:
+        return _chat_json(s.get(ChatSession, cid))
+
+
+@app.post("/api/chats/{cid}/messages", dependencies=[Depends(rate_limit)])
+async def send_message(cid: str, body: ChatMessageIn) -> dict:
+    if not ai_status()["configured"]:
+        raise HTTPException(503, AIError("not_configured").args[0])
+    with session() as s:
+        c = s.get(ChatSession, cid)
+        if not c:
+            raise HTTPException(404, "Chat not found.")
+        if c.status == "running":
+            raise HTTPException(409, "The assistant is still working on your last message.")
+        c.messages = list(c.messages or []) + [{"role": "user", "content": body.message}]
+        c.status, c.status_detail = "running", "Thinking…"
+    _spawn(_run_agent(cid))
+    with session() as s:
+        return _chat_json(s.get(ChatSession, cid))
+
+
+@app.delete("/api/chats/{cid}", status_code=204)
+def delete_chat(cid: str) -> Response:
+    with session() as s:
+        c = s.get(ChatSession, cid)
+        if not c:
+            raise HTTPException(404, "Chat not found.")
+        s.delete(c)
     return Response(status_code=204)
 
 

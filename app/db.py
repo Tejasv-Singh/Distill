@@ -99,7 +99,21 @@ class GeneratedOutput(Base):
     project: Mapped[Project] = relationship(back_populates="outputs")
 
 
-_connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+class ChatSession(Base):
+    """A conversation with the extraction assistant. `messages` is the provider-neutral
+    transcript (user / assistant / tool); tool messages also carry a `display` card for the UI."""
+    __tablename__ = "chat_sessions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(Text, default="New chat")
+    messages: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="idle")   # idle | running
+    status_detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+_connect_args ={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=_connect_args, pool_pre_ping=True)
 
 if settings.database_url.startswith("sqlite"):

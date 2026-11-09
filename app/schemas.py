@@ -156,3 +156,7 @@ class RenderRequest(BaseModel):
 class RegenerateRequest(BaseModel):
     section: Optional[str] = Field(None, max_length=300)   # heading text of the section to redo
     instructions: Optional[str] = Field(None, max_length=2000)
+
+
+class ChatMessageIn(BaseModel):
+    message: str = Field(..., min_length=1, max_length=8000)
