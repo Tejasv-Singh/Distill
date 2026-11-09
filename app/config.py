@@ -10,8 +10,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def _load_dotenv() -> None:
-    """Minimal .env loader so the app runs without python-dotenv."""
-    env = BASE_DIR / ".env"
+    """Minimal .env loader so the app runs without python-dotenv. Reads .env.local, then .env
+    (`neon env pull` writes to .env when it exists, otherwise .env.local). Real environment
+    variables always win, and .env.local wins over .env."""
+    for name in (".env.local", ".env"):
+        _load_env_file(BASE_DIR / name)
+
+
+def _load_env_file(env: Path) -> None:
     if not env.exists():
         return
     for line in env.read_text(encoding="utf-8").splitlines():
@@ -89,6 +95,19 @@ def _database_url() -> tuple[str, bool]:
 _DB_URL, _DB_EXPLICIT = _database_url()
 
 
+def _direct_database_url() -> str | None:
+    """The non-pooled connection string, used only for schema changes (CREATE TABLE ...).
+    Neon writes it as DATABASE_URL_UNPOOLED; Vercel's Postgres integrations as
+    POSTGRES_URL_NON_POOLING. DDL through a transaction-mode pooler (PgBouncer) is unreliable."""
+    if not _DB_EXPLICIT:
+        return None
+    for name in ("DATABASE_URL_UNPOOLED", "POSTGRES_URL_NON_POOLING"):
+        v = os.getenv(name, "").strip()
+        if v:
+            return normalize_database_url(v)
+    return None
+
+
 @dataclass
 class Settings:
     # environment
@@ -97,7 +116,8 @@ class Settings:
     runtime_dir: Path = RUNTIME_DIR
 
     # storage
-    database_url: str = _DB_URL
+    database_url: str = _DB_URL                       # pooled: all application traffic
+    database_url_direct: str | None = _direct_database_url()   # direct: schema creation only
     database_explicit: bool = _DB_EXPLICIT
     # "local": files on disk under storage_dir (development, Docker with a volume)
     # "database": files stored in the database (persistent on serverless, no extra service)

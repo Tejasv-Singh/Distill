@@ -181,11 +181,22 @@ def ensure_db() -> None:
         path = _sqlite_path()
         if path is not None:
             ensure_dir(path.parent)
+        # Schema changes go over the direct (non-pooled) connection when one is configured,
+        # e.g. Neon's DATABASE_URL_UNPOOLED; application traffic stays on the pooled URL.
+        ddl_engine = engine
+        if settings.database_url_direct and settings.database_url_direct != settings.database_url:
+            ddl_engine = create_engine(settings.database_url_direct, poolclass=NullPool,
+                                       connect_args={} if settings.database_url_direct.startswith("sqlite")
+                                       else {"connect_timeout": 10, "prepare_threshold": None})
         try:
-            Base.metadata.create_all(engine)
-        except (OperationalError, ProgrammingError):
-            # another instance created the tables at the same moment; retry once
-            Base.metadata.create_all(engine)
+            try:
+                Base.metadata.create_all(ddl_engine)
+            except (OperationalError, ProgrammingError):
+                # another instance created the tables at the same moment; retry once
+                Base.metadata.create_all(ddl_engine)
+        finally:
+            if ddl_engine is not engine:
+                ddl_engine.dispose()
         try:
             with session() as s:
                 if not s.query(User).filter_by(email=LOCAL_USER_EMAIL).first():

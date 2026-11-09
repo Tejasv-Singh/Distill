@@ -7,3 +7,5 @@ __pycache__/
 venv/
 demo_outputs/
 *.zip
+node_modules/
+.env.local

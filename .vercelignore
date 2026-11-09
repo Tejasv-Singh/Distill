@@ -11,3 +11,5 @@ start.bat
 run.py
 docker-compose.yml
 Dockerfile
+node_modules/
+.agents/

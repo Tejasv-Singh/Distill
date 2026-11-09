@@ -24,6 +24,8 @@ def _free_port() -> int:
 DEMO_PORT = _free_port()
 os.environ.update({
     "DATABASE_URL": f"sqlite:///{_tmp}/test.db",
+    "DATABASE_URL_UNPOOLED": "",          # a developer's .env (e.g. from `neon env pull`) must not leak in
+    "POSTGRES_URL_NON_POOLING": "",
     "STORAGE_DIR": f"{_tmp}/files",
     "PRIVATE_HOST_ALLOWLIST": f"localhost:{DEMO_PORT},127.0.0.1:{DEMO_PORT}",
     "RATE_LIMIT_PER_MINUTE": "0",

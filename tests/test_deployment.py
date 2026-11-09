@@ -67,7 +67,7 @@ DEMO = f"http://localhost:{DEMO_PORT}"
 os.environ["PRIVATE_HOST_ALLOWLIST"] = f"localhost:{DEMO_PORT}"
 '''
 
-_SCRUB = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "STORAGE_DIR", "STORAGE_BACKEND", "RUNTIME_DIR",
+_SCRUB = ("DATABASE_URL", "DATABASE_URL_UNPOOLED", "POSTGRES_URL_NON_POOLING", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "STORAGE_DIR", "STORAGE_BACKEND", "RUNTIME_DIR",
           "VERCEL", "SERVERLESS", "JOB_MODE", "ALLOW_EPHEMERAL_STORAGE", "PRIVATE_HOST_ALLOWLIST", "JS_RENDERING",
           "TAKE_SCREENSHOTS", "STALE_JOB_MINUTES")
 
@@ -171,7 +171,7 @@ def test_vercel_full_workflow_on_postgres(postgres_url):
             with session() as s:
                 r["files_left"] = s.query(StoredFile).filter(StoredFile.key.startswith(pid)).count()
         print("RESULT=" + json.dumps(r))
-    ''', {"VERCEL": "1", "DATABASE_URL": postgres_url}, demo=True)
+    ''', {"VERCEL": "1", "DATABASE_URL": postgres_url, "DATABASE_URL_UNPOOLED": postgres_url}, demo=True)
     code, health = out["health"]
     assert code == 200 and health["ok"] and health["database_ok"]
     assert health["platform"] == "vercel" and health["database"] == "postgresql" and health["persistent"]
@@ -302,3 +302,20 @@ def test_stale_jobs_are_reaped_not_left_spinning():
         assert s.get(GeneratedOutput, sid).status == "failed"
         assert "Interrupted" in s.get(GeneratedOutput, sid).error_message
         assert s.get(GeneratedOutput, fid).status == "running"
+
+
+def test_direct_url_used_only_for_schema(tmp_path):
+    out = run_app("""
+        import json
+        from app.config import settings
+        from app.db import ensure_db, engine
+        import sqlalchemy as sa
+        ensure_db()
+        direct = sa.create_engine(settings.database_url_direct)
+        with direct.connect() as c:
+            tables = sorted(r[0] for r in c.execute(sa.text("select name from sqlite_master where type='table'")))
+        print("RESULT=" + json.dumps({"app": str(engine.url), "direct": settings.database_url_direct, "tables": tables}))
+    """, {"DATABASE_URL": f"sqlite:///{tmp_path}/pooled.db", "DATABASE_URL_UNPOOLED": f"sqlite:///{tmp_path}/direct.db"})
+    # tables are created through the direct URL; the app engine keeps the pooled URL
+    assert out["app"].endswith("pooled.db") and out["direct"].endswith("direct.db")
+    assert "projects" in out["tables"] and "stored_files" in out["tables"]
