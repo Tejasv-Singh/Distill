@@ -9,3 +9,4 @@ demo_outputs/
 *.zip
 node_modules/
 .env.local
+.neon
