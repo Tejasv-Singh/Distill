@@ -1,0 +1,4 @@
+-r requirements.txt
+# Real PostgreSQL (PGlite, compiled to WebAssembly; needs Node.js) for the deployment tests.
+# Without it those tests are skipped.
+py-pglite>=0.5
