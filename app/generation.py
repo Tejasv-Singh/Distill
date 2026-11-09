@@ -5,7 +5,6 @@ import asyncio
 import csv
 import io
 import json
-from pathlib import Path
 
 from .ai import engine
 from .ai.prompts import TITLES
@@ -17,6 +16,7 @@ from .exporters.document_md import docs_to_markdown
 from .exporters.render import (fetch_images, first_title, image_srcs, render_docx, render_html, render_pdf,
                                render_txt)
 from .exporters.slides import render_pptx
+from .storage import get_storage
 
 EXT = {"pdf": "pdf", "docx": "docx", "markdown": "md", "txt": "txt", "html": "html", "csv": "csv",
        "xlsx": "xlsx", "json": "json", "xml": "xml", "pptx": "pptx"}
@@ -39,10 +39,15 @@ def file_format(o: GeneratedOutput) -> str:
     return o.configuration.get("download_format") or "markdown"
 
 
-def output_path(o: GeneratedOutput) -> Path:
-    p = settings.storage_dir / o.project_id / "outputs" / f"{o.id}.{EXT[file_format(o)]}"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+def output_key(project_id: str, oid: str, fmt: str) -> str:
+    return f"{project_id}/outputs/{oid}.{EXT[fmt]}"
+
+
+def store_output_file(project_id: str, oid: str, fmt: str, body: bytes) -> str:
+    """Write an output's file to storage and return its key. Call this *outside* any open
+    database session: the database storage backend uses its own short transaction, and
+    nesting it inside another open transaction would hold two connections at once."""
+    return get_storage().put(output_key(project_id, oid, fmt), body, MIME[fmt].split(";")[0])
 
 
 def load_docs(project_id: str, page_ids: list[str] | None = None) -> tuple[dict, list[dict]]:
@@ -140,11 +145,12 @@ async def run_output(oid: str) -> None:
                 body, w = await render_document(content, dl, opts)
                 warnings += w
                 opts["ai_stats"] = result.stats
+            out_fmt = fmt if kind in ("convert", "extract") else (opts.get("download_format") or "markdown")
+            key = store_output_file(project_id, oid, out_fmt, body)
             with session() as s:
                 o = s.get(GeneratedOutput, oid)
-                path = output_path(o)
-                path.write_bytes(body)
-                o.file_path, o.generated_content, o.title = str(path), content, title[:500]
+                o.file_path = key
+                o.generated_content, o.title = content, title[:500]
                 o.warnings, o.status, o.stage, o.configuration = warnings, "done", "Done", opts
                 o.error_message = None
         except AIError as e:
@@ -158,15 +164,15 @@ async def rerender(oid: str) -> None:
     """After an edit (or a format change), rebuild the file from the stored Markdown."""
     with session() as s:
         o = s.get(GeneratedOutput, oid)
-        fmt, md, opts = file_format(o), o.generated_content or "", dict(o.configuration)
+        fmt, md, opts, project_id = file_format(o), o.generated_content or "", dict(o.configuration), o.project_id
     if fmt not in DOC_FORMATS:
         raise ValueError("Only document outputs can be edited.")
     body, warnings = await render_document(md, fmt, opts)
+    key = store_output_file(project_id, oid, fmt, body)
     with session() as s:
         o = s.get(GeneratedOutput, oid)
-        path = output_path(o)
-        path.write_bytes(body)
-        o.file_path, o.title = str(path), first_title(md, o.title)
+        o.file_path = key
+        o.title = first_title(md, o.title)
         o.warnings = [w for w in (o.warnings or []) if "figures" in w or "instructions" in w] + warnings
 
 
@@ -174,19 +180,20 @@ async def rerun_extraction(oid: str, extra: str | None) -> None:
     from .ai.extract import extract_table, table_to_file
     with session() as s:
         o = s.get(GeneratedOutput, oid)
-        cfg, project_id = dict(o.configuration), o.project_id
+        cfg, project_id, table_fmt, title = dict(o.configuration), o.project_id, o.format, o.title
     instruction = cfg["instruction"] + (f"\n{extra}" if extra else "")
     try:
         _set(oid, status="running", stage="Extracting")
         _, docs = load_docs(project_id, cfg.get("page_ids") or None)
         cols = [c for c in cfg.get("columns", []) if c != "source_url"] if not extra else None
         table = await extract_table(docs, instruction, cols, progress=lambda m: _set(oid, stage=m))
+        key = store_output_file(project_id, oid, table_fmt, table_to_file(table, table_fmt, title))
         with session() as s:
             o = s.get(GeneratedOutput, oid)
             o.generated_content = json.dumps({"columns": table["columns"], "rows": table["rows"]}, ensure_ascii=False, default=str)
             o.configuration = {**cfg, "instruction": instruction, "columns": table["columns"], "stats": table["stats"]}
             o.warnings, o.status, o.stage, o.error_message = table["warnings"], "done", "Done", None
-            output_path(o).write_bytes(table_to_file(table, o.format, o.title))
+            o.file_path = key
     except Exception as e:  # noqa: BLE001
         _set(oid, status="failed", stage="Failed", error_message=f"Extraction failed: {e}")
 

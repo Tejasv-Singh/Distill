@@ -233,8 +233,7 @@ class Fetcher:
         await ctx.route("**/*", self._guard_route)
         return ctx, await ctx.new_page()
 
-    async def fetch_js(self, url: str, wait_for: str | None = None, scrolls: int = 0,
-                       screenshot_to: str | None = None) -> Page:
+    async def fetch_js(self, url: str, wait_for: str | None = None, scrolls: int = 0) -> Page:
         ctx, page = await self.new_guarded_page()
         try:
             try:
@@ -270,22 +269,18 @@ class Fetcher:
             err = _status_error(status)
             if err:
                 raise err
-            if screenshot_to:
-                try:
-                    await page.screenshot(path=screenshot_to, full_page=False, type="png")
-                except Exception:  # noqa: BLE001
-                    pass
             return Page(page.url, status, html, headers, rendered=True)
         finally:
             await ctx.close()
 
-    async def screenshot_html(self, html: str, base_url: str, path: str) -> None:
-        """Screenshot already-fetched HTML (used for static pages)."""
+    async def screenshot_html(self, html: str, base_url: str) -> bytes:
+        """Screenshot already-fetched HTML (used for the project preview). Returns PNG bytes;
+        nothing is written to disk."""
         ctx, page = await self.new_guarded_page()
         try:
             await page.set_content(_with_base(html, base_url), wait_until="domcontentloaded", timeout=15000)
             await page.wait_for_timeout(500)
-            await page.screenshot(path=path, full_page=False, type="png")
+            return await page.screenshot(full_page=False, type="png")
         finally:
             await ctx.close()
 

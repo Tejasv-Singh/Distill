@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -25,7 +26,7 @@ from .extract import extract_table, table_to_file
 from .providers import AIError, get_provider
 
 MAX_STEPS = 10
-CHAT_MAX_PAGES = 30
+CHAT_MAX_PAGES = min(30, settings.max_pages_cap)
 TABLE_FORMATS = ["csv", "xlsx", "json", "markdown"]
 
 SYSTEM = f"""You are Distill's extraction assistant. Users give you a website and describe what
@@ -177,8 +178,9 @@ class Agent:
                               delay_seconds=0.5))
         host = urlsplit(urls[0]).netloc
         self.status(f"Scraping {host}…")
+        uid = local_user_id()
         with session() as s:
-            p = Project(user_id=local_user_id(), name=f"{host} (chat)", source_url=urls[0],
+            p = Project(user_id=uid, name=f"{host} (chat)", source_url=urls[0],
                         config=json.loads(req.model_dump_json()), scraping_status="queued")
             s.add(p)
             s.flush()
@@ -237,19 +239,17 @@ class Agent:
         self.status("Extracting data…")
         table = await extract_table(docs, instruction, cols or None, progress=self.status)
         title = instruction[:120]
+        oid = uuid.uuid4().hex
+        key = generation.store_output_file(args["project_id"], oid, "xlsx", table_to_file(table, "xlsx", title))
         with session() as s:
-            o = GeneratedOutput(project_id=args["project_id"], kind="extract", format="xlsx", title=title,
+            o = GeneratedOutput(id=oid, project_id=args["project_id"], kind="extract", format="xlsx", title=title,
+                                file_path=key,
                                 configuration={"instruction": instruction, "columns": table["columns"],
                                                "page_ids": ids, "stats": table["stats"]},
                                 generated_content=json.dumps({"columns": table["columns"], "rows": table["rows"]},
                                                              ensure_ascii=False, default=str),
                                 warnings=table["warnings"], status="done", stage="Done")
             s.add(o)
-            s.flush()
-            path = generation.output_path(o)
-            path.write_bytes(table_to_file(table, "xlsx", title))
-            o.file_path = str(path)
-            oid = o.id
         result = {"extraction_id": oid, "columns": table["columns"], "row_count": len(table["rows"]),
                   "sample_rows": table["rows"][:8], "warnings": table["warnings"]}
         return result, {"type": "extract", "output_id": oid, "columns": table["columns"],

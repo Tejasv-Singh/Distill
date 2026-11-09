@@ -5,13 +5,13 @@ import asyncio
 import time
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..config import settings
 from ..db import Project, ScrapedPage, ScrapingJob, session
 from ..schemas import ScrapeRequest
 from ..security import UnsafeURL, resolve_public
+from ..storage import get_storage
 from .discovery import Robots, discover_sitemap_urls, find_next_link, is_crawlable, url_passes
 from .extractor import extract_document, page_links
 from .fetcher import FetchError, Fetcher
@@ -189,11 +189,10 @@ async def run_scrape_job(project_id: str, job_id: str, req: ScrapeRequest) -> No
         # ---- 5. preparing: screenshot + final status
         progress("preparing", 0.97, "Capturing preview")
         if first_html and settings.take_screenshots and settings.js_rendering:
-            shot = settings.storage_dir / project_id / "preview.png"
-            shot.parent.mkdir(parents=True, exist_ok=True)
             try:
-                await asyncio.wait_for(fetcher.screenshot_html(first_html[0], first_html[1], str(shot)), 25)
-                _set_project(project_id, screenshot_path=str(shot))
+                png = await asyncio.wait_for(fetcher.screenshot_html(first_html[0], first_html[1]), 25)
+                key = get_storage().put(preview_key(project_id), png, "image/png")
+                _set_project(project_id, screenshot_path=key)
             except Exception:  # noqa: BLE001  (preview is optional)
                 pass
 
@@ -243,5 +242,5 @@ async def discover_pages(url: str, use_sitemap: bool, limit: int) -> dict:
         await fetcher.close()
 
 
-def preview_path(project_id: str) -> Path:
-    return settings.storage_dir / project_id / "preview.png"
+def preview_key(project_id: str) -> str:
+    return f"{project_id}/preview.png"
